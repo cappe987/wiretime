@@ -1,0 +1,14 @@
+// SPDX-License-Identifier: MIT
+// SPDX-FileCopyrightText: 2023 Casper Andersson <casper.casan@gmail.com>
+
+#ifndef _TSLM_VERSION_H
+#define _TSLM_VERSION_H
+
+#define tslm_VERSION_MAJOR @tslm_VERSION_MAJOR@
+#define tslm_VERSION_MINOR @tslm_VERSION_MINOR@
+
+
+#define LATENCY_VERSION() fprintf(stderr, "latency-%d.%d\n", tslm_VERSION_MAJOR, tslm_VERSION_MINOR);
+
+
+#endif /* _TSLM_VERSION_H */
