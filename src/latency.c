@@ -88,7 +88,8 @@ typedef struct packets {
 typedef struct config {
 	int pkts_per_sec; /* Max 1000 (1 pkts per ms) */
 	int pkts_per_summary; /* Defaults to pkt_per_sec if not set*/
-	int prio;
+	int pcp;
+	int priority;
 	int vlan;
 	bool one_step;
 	bool ptp_only;
@@ -155,10 +156,12 @@ void help()
 		"        -r, --rx <IFACE>\n"
 		"            Receive packets on <IFACE>. Can be a VLAN or other interface,\n"
 		"            as long as the physical port supports hardware timestamping.\n"
-		"        -p, --prio <PRIO>\n"
+		"        -p, --pcp <PRIO>\n"
 		"            PCP priority. If VLAN is not set it will use VLAN 0.\n"
 		"        -v, --vlan <VID>\n"
-		"            VLAN to use when (useful when used together with prio).\n"
+		"            Tag with this VID (useful when used together with PCP).\n"
+		"        -P, --prio <PRIO>\n"
+		"            Socket priority. Useful for egress QoS.\n"
 		"        -o, --one-step\n"
 		"            Use one-step TX instead of two-step.\n"
 		"        -O, --out <filename>\n"
@@ -178,6 +181,10 @@ void help()
 		"        --plot <filename>\n"
 		"            Plots the data using Gnuplot and exports as PDF. If -O is \n"
 		"            not used it will create a temporary file for storing the data.\n"
+		"        --tstamp-all\n"
+		"            Enable timestamping of non-PTP packets. On some NICs this will behave\n"
+		"            differently than timestamping PTP packets only.\n"
+
 		/*"\n"*/
 		,stderr);
 
@@ -314,7 +321,7 @@ __u16 char_to_u16(unsigned char a[]) {
 
 static inline int using_tagged(Config *cfg)
 {
-	return cfg->vlan != 0 || cfg->prio != 0;
+	return cfg->vlan != 0 || cfg->pcp != 0;
 }
 
 static void set_sequenceId(Config *cfg, unsigned char *packet, __u16 seq_id)
@@ -333,7 +340,7 @@ static void set_vid_pcp(Config *cfg, Packets *pkts)
 {
 	if (!using_tagged(cfg))
 		return;
-	pkts->frame[PRIO_OFFSET] = ((cfg->prio & 0x7) << 5) | ((cfg->vlan & 0xf00) >> 8);
+	pkts->frame[PRIO_OFFSET] = ((cfg->pcp & 0x7) << 5) | ((cfg->vlan & 0xf00) >> 8);
 	pkts->frame[PRIO_OFFSET+1] = (unsigned char) cfg->vlan;
 }
 
@@ -996,19 +1003,20 @@ static int parse_args(int argc, char **argv, Config *cfg)
 		{ "help",             no_argument,       NULL,    'h' },
 		{ "tx",               required_argument, NULL,    't' },
 		{ "rx",               required_argument, NULL,    'r' },
-		{ "prio",             required_argument, NULL,    'p' },
+		{ "pcp",              required_argument, NULL,    'p' },
 		{ "vlan",             required_argument, NULL,    'v' },
+		{ "prio",             required_argument, NULL,    'P' },
 		{ "pkts_per_summary", required_argument, NULL,    'S' },
 		{ "pkts_per_sec",     required_argument, NULL,    's' },
 		{ "out",              required_argument, NULL,    'O' },
-		{ "plot",             required_argument, NULL,    'P' },
+		{ "plot",             required_argument, NULL,    '1' },
 		{ "one-step",         no_argument,       NULL,    'o' },
-		{ "tstamp-all",       no_argument,       NULL,    'a' },
+		{ "tstamp-all",       no_argument,       NULL,    '2' },
 		{ "debug",            no_argument,       NULL,    'd' },
 		{ NULL,               0,                 NULL,     0  }
 	};
 
-	while ((c = getopt_long(argc, argv, "O:S:s:p:v:r:t:hdV", long_options, &opt_index)) != -1) {
+	while ((c = getopt_long(argc, argv, "O:S:s:P:p:v:r:t:hdV", long_options, &opt_index)) != -1) {
 		switch (c)
 		{
 			case 'O':
@@ -1017,12 +1025,12 @@ static int parse_args(int argc, char **argv, Config *cfg)
 			case 'o':
 				cfg->one_step = true;
 				break;
-			case 'a':
-				cfg->ptp_only = false;
-				break;
-			case 'P':
+			case '1':
 				cfg->plot = true;
 				cfg->plot_filename = optarg;
+				break;
+			case '2':
+				cfg->ptp_only = false;
 				break;
 			case 't':
 				cfg->tx_iface = optarg;
@@ -1031,15 +1039,22 @@ static int parse_args(int argc, char **argv, Config *cfg)
 				cfg->rx_iface = optarg;
 				break;
 			case 'p':
-				cfg->prio = strtol(optarg, NULL, 0);
-				if (cfg->prio < 0 || cfg->prio > 7) {
-					fprintf(stderr, "Out of range: Prio must be 0-7\n");
+				cfg->pcp = strtol(optarg, NULL, 0);
+				if (cfg->pcp < 0 || cfg->pcp > 7) {
+					fprintf(stderr, "Out of range: PCP must be 0-7\n");
+					return EINVAL;
+				}
+				break;
+			case 'P':
+				cfg->priority = strtol(optarg, NULL, 0);
+				if (cfg->priority < 0 || cfg->priority > 7) {
+					fprintf(stderr, "Out of range: priority must be 0-7\n");
 					return EINVAL;
 				}
 				break;
 			case 'v':
 				cfg->vlan = strtol(optarg, NULL, 0);
-				if (cfg->vlan < 0 || cfg->prio > 4095) {
+				if (cfg->vlan < 0 || cfg->vlan > 4095) {
 					fprintf(stderr, "Out of range: VLAN must be 0-4095\n");
 					return EINVAL;
 				}
@@ -1127,8 +1142,9 @@ int main(int argc, char **argv)
 	cfg.pkts_per_sec = 100;
 	cfg.pkts_per_summary = 0;
 	cfg.out_file = NULL;
-	cfg.prio = 0;
+	cfg.pcp  = 0;
 	cfg.vlan = 0;
+	cfg.priority = 0;
 	cfg.plot = false;
 	cfg.plot_filename = NULL;
 
@@ -1177,13 +1193,13 @@ int main(int argc, char **argv)
 		return ENOMEM;
 
 	/* Receiver */
-	args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.prio, cfg.ptp_only);
+	args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only);
 	args.cfg = &cfg;
 	args.pkts = &pkts;
 	pthread_create(&receiver, NULL, rcv_pkt, &args);
 
 	/* Sender */
-	tx_sock = setup_tx_sock(cfg.tx_iface, cfg.prio, cfg.ptp_only, cfg.one_step);
+	tx_sock = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step);
 	get_smac(tx_sock, cfg.tx_iface, mac);
 	set_smac(pkts.frame, mac);
 
