@@ -4,7 +4,7 @@
 cmake_minimum_required(VERSION 3.12)
 
 # ============= Linktest shared ===============
-project(tslm VERSION 1.0)
+project(wiretime VERSION 1.0)
 
 add_library(link STATIC include/liblink.h src/liblink.c)
 target_include_directories(link PUBLIC ${PROJECT_SOURCE_DIR}/include/)
@@ -20,16 +20,16 @@ endmacro()
 
 set(PROJECT_INCLUDES ${PROJECT_SOURCE_DIR}/include ${PROJECT_BINARY_DIR}/include)
 
-# ============= latency ===============
-project(tslm VERSION 1.0)
+# ============= Wiretime ===============
+project(wiretime VERSION 1.0)
 
 # ---- BUILD ----
-add_executable(tslm)
-target_sources(tslm PRIVATE src/latency.c)
+add_executable(wiretime)
+target_sources(wiretime PRIVATE src/wiretime.c)
 
-target_include_directories(tslm PUBLIC ${PROJECT_INCLUDES})
-target_link_libraries(tslm PUBLIC pthread link)
-m_install(tslm)
+target_include_directories(wiretime PUBLIC ${PROJECT_INCLUDES})
+target_link_libraries(wiretime PUBLIC pthread link)
+m_install(wiretime)
 
 # ============= Configure ===============
 configure_file(include/version.h.in include/version.h)

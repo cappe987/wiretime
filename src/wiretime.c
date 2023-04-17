@@ -141,10 +141,10 @@ static void bail(const char *error)
 
 void help()
 {
-	fputs(  "latency - Measure latency using hardware timestamping\n"
+	fputs(  "wiretime - Measure packet time on wire using hardware timestamping\n"
 		"\n"
 		"USAGE:\n"
-		"        latency --tx <IFACE1> --rx <IFACE2> [OPTIONS]\n"
+		"        wiretime --tx <IFACE1> --rx <IFACE2> [OPTIONS]\n"
 		"\n"
 		"        Transmits on <IFACE1> and receives on <IFACE2>.\n"
 		"        Both interfaces must support hardware timestamping of non-PTP packets.\n"
@@ -1078,7 +1078,7 @@ static int parse_args(int argc, char **argv, Config *cfg)
 				help();
 				exit(0);
 			case 'V':
-				LATENCY_VERSION();
+				WIRETIME_VERSION();
 				exit(0);
 			case '?':
 				if (optopt == 'c')
@@ -1175,7 +1175,7 @@ int main(int argc, char **argv)
 		using_tmpfile = true;
 		memset(tmpnamebuf, 0, sizeof(tmpnamebuf));
 		cfg.out_filename = tmpnamebuf;
-		strncpy(tmpnamebuf, "/tmp/latency-XXXXXX", 19);
+		strncpy(tmpnamebuf, "/tmp/wiretime-XXXXXX", 19);
 		int fd = mkstemp(tmpnamebuf);
 		cfg.out_file = fdopen(fd, "w");
 		if (!cfg.out_file) {
