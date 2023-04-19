@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: 2023 Casper Andersson <casper.casan@gmail.com>
 #!/bin/bash
 
 input=$1

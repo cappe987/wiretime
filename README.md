@@ -1,3 +1,5 @@
+<!--SPDX-License-Identifier: MIT-->
+<!--SPDX-FileCopyrightText: 2023 Casper Andersson <casper.casan@gmail.com>-->
 # Wiretime
 
 Measure the time a packet is on the wire accurately using hardware timestamping.

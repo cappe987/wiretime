@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: (GPL-2.0 OR MIT)
+// SPDX-License-Identifier: (GPL-2.0-only OR MIT)
 // SPDX-FileCopyrightText: 2023 Casper Andersson <casper.casan@gmail.com>
 /*
  * Copyright 2019 NXP
