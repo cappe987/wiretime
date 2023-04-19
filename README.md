@@ -10,6 +10,11 @@ features.
 wiretime --tx eth0 --rx eth1
 ```
 
+Plot nice graphs using Gnuplot. Use `-O <filename>` to save the measurements to
+a file. Then transfer the file to a device that has Gnuplot and run the script
+`scripts/plot_latency.sh <input> <output.pdf>` on it. Or if your target device
+has Gnuplot you can use the flag `--plot <filename.pdf>` directly.
+
 ## TODO
 - Use receiving ports MAC as DMAC instead of broadcast.
 
