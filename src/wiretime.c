@@ -384,25 +384,25 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 	if (debugen)
 		gettimeofday(&now, 0);
 
-	DEBUG("%ld.%06ld: received %s data, %d bytes from %s, %zu bytes control messages\n",
-	       (long)now.tv_sec, (long)now.tv_usec,
-	       (recvmsg_flags & MSG_ERRQUEUE) ? "error" : "regular",
-	       res,
-	       inet_ntoa(from_addr->sin_addr),
-	       msg->msg_controllen);
+	/*DEBUG("%ld.%06ld: received %s data, %d bytes from %s, %zu bytes control messages\n",*/
+	       /*(long)now.tv_sec, (long)now.tv_usec,*/
+	       /*(recvmsg_flags & MSG_ERRQUEUE) ? "error" : "regular",*/
+	       /*res,*/
+	       /*inet_ntoa(from_addr->sin_addr),*/
+	       /*msg->msg_controllen);*/
 
 	for (cmsg = CMSG_FIRSTHDR(msg);
 	     cmsg;
 	     cmsg = CMSG_NXTHDR(msg, cmsg)) {
-		DEBUG("   cmsg len %zu: ", cmsg->cmsg_len);
+		/*DEBUG("   cmsg len %zu: ", cmsg->cmsg_len);*/
 		switch (cmsg->cmsg_level) {
 		case SOL_SOCKET:
-			DEBUG("SOL_SOCKET ");
+			/*DEBUG("SOL_SOCKET ");*/
 			switch (cmsg->cmsg_type) {
 			case SO_TIMESTAMP: {
 				struct timeval *stamp =
 					(struct timeval *)CMSG_DATA(cmsg);
-				DEBUG("SO_TIMESTAMP %ld.%06ld",
+				DEBUG("SO_TIMESTAMP %ld.%06ld\n",
 				       (long)stamp->tv_sec,
 				       (long)stamp->tv_usec);
 				break;
@@ -410,13 +410,13 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 			case SO_TIMESTAMPNS: {
 				struct timespec *stamp =
 					(struct timespec *)CMSG_DATA(cmsg);
-				DEBUG("SO_TIMESTAMPNS %ld.%09ld",
+				DEBUG("SO_TIMESTAMPNS %ld.%09ld\n",
 				       (long)stamp->tv_sec,
 				       (long)stamp->tv_nsec);
 				break;
 			}
 			case SO_TIMESTAMPING: {
-				DEBUG("SO_TIMESTAMPING ");
+				/*DEBUG("SO_TIMESTAMPING ");*/
 				stamp = (struct timespec *)CMSG_DATA(cmsg);
 				/* stamp is an array containing 3 timespecs:
 				 * SW, HW transformed, HW raw.
@@ -431,17 +431,17 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 				break;
 			}
 			default:
-				DEBUG("type %d", cmsg->cmsg_type);
+				DEBUG("type %d\n", cmsg->cmsg_type);
 				break;
 			}
 			break;
 		default:
-			DEBUG("level %d type %d",
+			DEBUG("level %d type %d\n",
 				cmsg->cmsg_level,
 				cmsg->cmsg_type);
 			break;
 		}
-		DEBUG("\n");
+		/*DEBUG("\n");*/
 	}
 
 	if (!stamp)
@@ -459,11 +459,11 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 	if (tx_seq >= 0) {
 		got_tx = 1;
 		pkt_seq = tx_seq;
-		/*printf("Got TX seq %d. %lu.%lu\n", pkt_seq, stamp->tv_sec, stamp->tv_nsec);*/
+		DEBUG("Got TX seq %d. %lu.%lu\n", pkt_seq, stamp->tv_sec, stamp->tv_nsec);
 	} else if (is_rx_tstamp(data)) {
 		got_rx = 1;
 		pkt_seq = get_sequenceId(data);
-		/*printf("Got RX seq %d. %lu.%lu\n", pkt_seq, stamp->tv_sec, stamp->tv_nsec);*/
+		DEBUG("Got RX seq %d. %lu.%lu\n", pkt_seq, stamp->tv_sec, stamp->tv_nsec);
 	} else {
 		// If the packet we read was not the tx packet then set back
 		// txcount_flag and try again.
@@ -484,7 +484,7 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 		one_step_ts.tv_nsec = ntohl(one_step_ts.tv_nsec);
 		if (pkts->list[idx].seq == pkt_seq)
 			pkts->list[idx].xmit = one_step_ts;
-		/*printf("Got TX one-step seq %d. %lu.%lu\n", pkt_seq, stamp->tv_sec, stamp->tv_nsec);*/
+		DEBUG("Got TX one-step seq %d. %lu.%lu\n", pkt_seq, one_step_ts.tv_sec, one_step_ts.tv_nsec);
 	}
 
 	if (!cfg->has_first) {
@@ -530,10 +530,11 @@ static void recvpacket(int sock, int recvmsg_flags,
 
 	res = recvmsg(sock, &msg, recvmsg_flags | MSG_DONTWAIT);
 	if (res < 0)
-		DEBUG("%s %s: %s\n",
-		       "recvmsg",
-		       "regular",
-		       strerror(errno));
+		DEBUG("");
+		/*DEBUG("%s %s: %s\n",*/
+		       /*"recvmsg",*/
+		       /*"regular",*/
+		       /*strerror(errno));*/
 	else
 		parse_and_save_tstamp(&msg, res, recvmsg_flags, res, cfg, pkts, tx_seq);
 }
@@ -668,14 +669,14 @@ static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
 		/*res = do_send_one(sock, length);*/
 	/*}*/
 
-	gettimeofday(&now, 0);
-	if (res < 0)
-		DEBUG("%s: %s\n", "send", strerror(errno));
-	else
-		DEBUG("%ld.%06ld - %ld.%06ld: sent %d bytes\n",
-		      (long)nowb.tv_sec, (long)nowb.tv_usec,
-		      (long)now.tv_sec, (long)now.tv_usec,
-		      res);
+	/*gettimeofday(&now, 0);*/
+	/*if (res < 0)*/
+		/*DEBUG("%s: %s\n", "send", strerror(errno));*/
+	/*else*/
+		/*DEBUG("%ld.%06ld - %ld.%06ld: sent %d bytes\n",*/
+		      /*(long)nowb.tv_sec, (long)nowb.tv_usec,*/
+		      /*(long)now.tv_sec, (long)now.tv_usec,*/
+		      /*res);*/
 	return tx_seq;
 }
 
