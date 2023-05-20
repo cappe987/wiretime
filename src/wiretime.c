@@ -133,6 +133,22 @@ static bool running = true;
 
 #define DEBUG(...) _DEBUG(stderr, __VA_ARGS__)
 
+static void debug_packet_data(size_t length, uint8_t *data)
+{
+	size_t i;
+
+	if (!debugen)
+		return;
+
+	DEBUG("Length %ld\n", length);
+	if (length > 0) {
+		fprintf(stderr, " ");
+		for (i = 0; i < length; i++)
+			fprintf(stderr, "%02x ", data[i]);
+		fprintf(stderr, "\n");
+	}
+}
+
 static void bail(const char *error)
 {
 	printf("%s: %s\n", error, strerror(errno));
@@ -306,6 +322,7 @@ static __u16 get_sequenceId(unsigned char *buf)
 		return ntohs(char_to_u16(&buf[SEQ_OFFSET]));
 }
 
+/* Checks that the packet received was actually one sent by us */
 static int is_rx_tstamp(unsigned char *buf)
 {
 	// Will arive without tag when received on the socket
@@ -327,49 +344,17 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 	struct cmsghdr *cmsg;
 	struct timespec *stamp = NULL;
 	struct timespec one_step_ts;
-	struct timeval now;
 	__u16 pkt_seq;
 	unsigned char *data;
 	int idx;
 	int got_tx = 0;
 	int got_rx = 0;
 
-	if (debugen)
-		gettimeofday(&now, 0);
-
-	/*DEBUG("%ld.%06ld: received %s data, %d bytes from %s, %zu bytes control messages\n",*/
-	       /*(long)now.tv_sec, (long)now.tv_usec,*/
-	       /*(recvmsg_flags & MSG_ERRQUEUE) ? "error" : "regular",*/
-	       /*res,*/
-	       /*inet_ntoa(from_addr->sin_addr),*/
-	       /*msg->msg_controllen);*/
-
-	for (cmsg = CMSG_FIRSTHDR(msg);
-	     cmsg;
-	     cmsg = CMSG_NXTHDR(msg, cmsg)) {
-		/*DEBUG("   cmsg len %zu: ", cmsg->cmsg_len);*/
+	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
 		switch (cmsg->cmsg_level) {
 		case SOL_SOCKET:
-			/*DEBUG("SOL_SOCKET ");*/
 			switch (cmsg->cmsg_type) {
-			case SO_TIMESTAMP: {
-				struct timeval *stamp =
-					(struct timeval *)CMSG_DATA(cmsg);
-				DEBUG("SO_TIMESTAMP %ld.%06ld\n",
-				       (long)stamp->tv_sec,
-				       (long)stamp->tv_usec);
-				break;
-			}
-			case SO_TIMESTAMPNS: {
-				struct timespec *stamp =
-					(struct timespec *)CMSG_DATA(cmsg);
-				DEBUG("SO_TIMESTAMPNS %ld.%09ld\n",
-				       (long)stamp->tv_sec,
-				       (long)stamp->tv_nsec);
-				break;
-			}
 			case SO_TIMESTAMPING: {
-				/*DEBUG("SO_TIMESTAMPING ");*/
 				stamp = (struct timespec *)CMSG_DATA(cmsg);
 				/* stamp is an array containing 3 timespecs:
 				 * SW, HW transformed, HW raw.
@@ -384,30 +369,23 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 				break;
 			}
 			default:
-				DEBUG("type %d\n", cmsg->cmsg_type);
+				/*DEBUG("type %d\n", cmsg->cmsg_type);*/
 				break;
 			}
 			break;
 		default:
-			DEBUG("level %d type %d\n",
-				cmsg->cmsg_level,
-				cmsg->cmsg_type);
+			/*DEBUG("level %d type %d\n",*/
+				/*cmsg->cmsg_level,*/
+				/*cmsg->cmsg_type);*/
 			break;
 		}
-		/*DEBUG("\n");*/
 	}
 
 	if (!stamp)
 		return;
 
 	data = (unsigned char*)msg->msg_iov->iov_base;
-	/*int printlen = using_tagged(cfg) ? sizeof(sync_packet_tagged) : sizeof(sync_packet);*/
-	/*printf("Length %d\n", length);*/
-	/*if (length > 0) {*/
-		/*for (int i = 0; i < length; i++)*/
-			/*printf("%02x ", data[i]);*/
-		/*printf("\n");*/
-	/*}*/
+	debug_packet_data(length, data);
 
 	if (tx_seq >= 0) {
 		got_tx = 1;
@@ -482,13 +460,7 @@ static void recvpacket(int sock, int recvmsg_flags,
 	msg.msg_controllen = sizeof(control);
 
 	res = recvmsg(sock, &msg, recvmsg_flags | MSG_DONTWAIT);
-	if (res < 0)
-		DEBUG("");
-		/*DEBUG("%s %s: %s\n",*/
-		       /*"recvmsg",*/
-		       /*"regular",*/
-		       /*strerror(errno));*/
-	else
+	if (res >= 0)
 		parse_and_save_tstamp(&msg, res, recvmsg_flags, res, cfg, pkts, tx_seq);
 }
 
@@ -557,20 +529,6 @@ static int do_send_one(int fdt, int length)
 	msg.msg_iov = &iov;
 	msg.msg_iovlen = 1;
 
-	/*if (packet_delay_us >= 0) {*/
-		/*memset(control, 0, sizeof(control));*/
-		/*msg.msg_control = &control;*/
-		/*msg.msg_controllen = sizeof(control);*/
-
-		/*tdeliver = gettime_ns() + delay_us * 1000;*/
-		/*printf("set TXTIME is %ld\n", tdeliver);*/
-		/*cm = CMSG_FIRSTHDR(&msg);*/
-		/*cm->cmsg_level = SOL_SOCKET;*/
-		/*cm->cmsg_type = SCM_TXTIME;*/
-		/*cm->cmsg_len = CMSG_LEN(sizeof(tdeliver));*/
-		/*memcpy(CMSG_DATA(cm), &tdeliver, sizeof(tdeliver));*/
-	/*}*/
-
 	ret = sendmsg(fdt, &msg, 0);
 	if (ret == -1)
 		printf("error write, return error sendmsg!\n");
@@ -598,7 +556,7 @@ static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
 
 	tx_seq = pkts->next_seq;
 	pkts->next_seq++;
-	/*printf("Xmit: %llu\n", tx_seq);*/
+	DEBUG("Xmit: %u\n", tx_seq);
 
 	set_sequenceId(cfg, pkts->frame, tx_seq);
 
@@ -606,30 +564,11 @@ static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
 
 	gettimeofday(&nowb, 0);
 
-	/*if (length < sizeof(sync_packet)) {*/
 	if (using_tagged(cfg))
 		res = send(sock, pkts->frame, sizeof(sync_packet_tagged), 0);
 	else
 		res = send(sock, pkts->frame, sizeof(sync_packet), 0);
-	/*} else {*/
-#if 0
-		char *buf = (char *)malloc(length);
 
-		memcpy(buf, sync_packet, sizeof(sync_packet));
-		res = send(sock, buf, length, 0);
-		free(buf);
-#endif
-		/*res = do_send_one(sock, length);*/
-	/*}*/
-
-	/*gettimeofday(&now, 0);*/
-	/*if (res < 0)*/
-		/*DEBUG("%s: %s\n", "send", strerror(errno));*/
-	/*else*/
-		/*DEBUG("%ld.%06ld - %ld.%06ld: sent %d bytes\n",*/
-		      /*(long)nowb.tv_sec, (long)nowb.tv_usec,*/
-		      /*(long)now.tv_sec, (long)now.tv_usec,*/
-		      /*res);*/
 	return tx_seq;
 }
 
