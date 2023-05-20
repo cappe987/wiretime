@@ -7,7 +7,53 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
+#ifndef SO_TIMESTAMPING
+# define SO_TIMESTAMPING         37
+# define SCM_TIMESTAMPING        SO_TIMESTAMPING
+#endif
+
+#ifndef SO_TIMESTAMPNS
+# define SO_TIMESTAMPNS 35
+#endif
+
+#ifndef SIOCGSTAMPNS
+# define SIOCGSTAMPNS 0x8907
+#endif
+
+#ifndef SIOCSHWTSTAMP
+# define SIOCSHWTSTAMP 0x89b0
+#endif
+
+#ifndef CLOCK_TAI
+#define CLOCK_TAI                       11
+#endif
+
+#ifndef SCM_TXTIME
+#define SO_TXTIME               61
+#define SCM_TXTIME              SO_TXTIME
+#endif
+#define _DEBUG(file, fmt, ...) do { \
+	if (debugen) { \
+		fprintf(file, " " fmt, \
+		##__VA_ARGS__); \
+	} else { \
+		; \
+	} \
+} while (0)
+
+#define DEBUG(...) _DEBUG(stderr, __VA_ARGS__)
+
+static void bail(const char *error)
+{
+	printf("%s: %s\n", error, strerror(errno));
+	exit(1);
+}
+
+
+extern bool debugen;// = false;
+extern bool running;// = true;
 
 struct pkt_time {
 	__u16 seq;
@@ -23,6 +69,7 @@ typedef struct packets {
 	__u16 next_seq;
 	bool txcount_flag;
 	unsigned char *frame;
+	size_t frame_size;
 } Packets;
 
 typedef struct config {
@@ -49,8 +96,16 @@ struct thread_data {
 	int sockfd;
 };
 
-
+/* timestamping.c */
 void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts);
+void *rcv_pkt(void *arg);
+void rcv_xmit_tstamp(int sock, Config *cfg, Packets *pkts, __u16 tx_seq);
+int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step);
+int setup_rx_sock(char *iface, int prio, bool ptp_only);
+
+/* wiretime.c */
+void save_tstamp(struct timespec *stamp, unsigned char *data, size_t length,
+		 Config *cfg, Packets *pkts, __s32 tx_seq, int recvmsg_flags);
 
 
 #endif /* __WIRETIME_H__ */

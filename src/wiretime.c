@@ -16,50 +16,24 @@
 
 #include <stdio.h>
 #include <stdbool.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/time.h>
-#include <asm/socket.h>
-#include <sys/types.h>
-#include <sys/select.h>
-#include <sys/ioctl.h>
 #include <arpa/inet.h>
 #include <net/if.h>
-#include <linux/if_arp.h>
-#include <sys/queue.h>
 #include <signal.h>
 #include <getopt.h>
-#include <endian.h>
 
 #include <asm/types.h>
 
 #include <linux/if_ether.h>
-#include <linux/errqueue.h>
-#include <linux/net_tstamp.h>
 
 #include "version.h"
 #include "liblink.h"
 #include "wiretime.h"
 
-#ifndef SO_TIMESTAMPING
-# define SO_TIMESTAMPING         37
-# define SCM_TIMESTAMPING        SO_TIMESTAMPING
-#endif
-
-#ifndef SO_TIMESTAMPNS
-# define SO_TIMESTAMPNS 35
-#endif
-
-#ifndef SIOCGSTAMPNS
-# define SIOCGSTAMPNS 0x8907
-#endif
-
-#ifndef SIOCSHWTSTAMP
-# define SIOCSHWTSTAMP 0x89b0
-#endif
 
 #define VLAN_TAG_SIZE 4
 #define PRIO_OFFSET 14
@@ -71,49 +45,9 @@
 #define DOMAIN_NUM 0xff
 
 
-static bool debugen = false;
-static bool running = true;
+bool debugen = false;
+bool running = true;
 
-#ifndef CLOCK_TAI
-#define CLOCK_TAI                       11
-#endif
-
-#ifndef SCM_TXTIME
-#define SO_TXTIME               61
-#define SCM_TXTIME              SO_TXTIME
-#endif
-#define _DEBUG(file, fmt, ...) do { \
-	if (debugen) { \
-		fprintf(file, " " fmt, \
-		##__VA_ARGS__); \
-	} else { \
-		; \
-	} \
-} while (0)
-
-#define DEBUG(...) _DEBUG(stderr, __VA_ARGS__)
-
-static void debug_packet_data(size_t length, uint8_t *data)
-{
-	size_t i;
-
-	if (!debugen)
-		return;
-
-	DEBUG("Length %ld\n", length);
-	if (length > 0) {
-		fprintf(stderr, " ");
-		for (i = 0; i < length; i++)
-			fprintf(stderr, "%02x ", data[i]);
-		fprintf(stderr, "\n");
-	}
-}
-
-static void bail(const char *error)
-{
-	printf("%s: %s\n", error, strerror(errno));
-	exit(1);
-}
 
 void help()
 {
@@ -166,23 +100,26 @@ void help()
 
 }
 
-static void sig_handler(int sig)
+static void debug_packet_data(size_t length, uint8_t *data)
 {
-	running = false;
+	size_t i;
+
+	if (!debugen)
+		return;
+
+	DEBUG("Length %ld\n", length);
+	if (length > 0) {
+		fprintf(stderr, " ");
+		for (i = 0; i < length; i++)
+			fprintf(stderr, "%02x ", data[i]);
+		fprintf(stderr, "\n");
+	}
 }
 
 
-int str2mac(const char *s, unsigned char mac[ETH_ALEN])
+static void sig_handler(int sig)
 {
-	unsigned char buf[ETH_ALEN];
-	int c;
-	c = sscanf(s, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx",
-		   &buf[0], &buf[1], &buf[2], &buf[3], &buf[4], &buf[5]);
-	if (c != ETH_ALEN) {
-		return -1;
-	}
-	memcpy(mac, buf, ETH_ALEN);
-	return 0;
+	running = false;
 }
 
 static uint64_t gettime_ns(void)
@@ -314,23 +251,15 @@ static struct timespec get_one_step(Packets *pkts, int idx, unsigned char *data,
 	return one_step_ts;
 }
 
-static void parse_and_save_tstamp(struct msghdr *msg, int res,
-				  int recvmsg_flags, size_t length,
-				  Config *cfg, Packets *pkts, __s32 tx_seq)
+void save_tstamp(struct timespec *stamp, unsigned char *data, size_t length,
+		 Config *cfg, Packets *pkts, __s32 tx_seq, int recvmsg_flags)
 {
-	struct timespec *stamp = NULL;
 	struct timespec one_step_ts;
 	__u16 pkt_seq;
-	unsigned char *data;
 	int idx;
 	int got_tx = 0;
 	int got_rx = 0;
 
-	get_timestamp(msg, &stamp, recvmsg_flags, pkts);
-	if (!stamp)
-		return;
-
-	data = (unsigned char*)msg->msg_iov->iov_base;
 	debug_packet_data(length, data);
 
 	if (tx_seq >= 0) {
@@ -370,110 +299,7 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 	pthread_mutex_unlock(&pkts->list_lock);
 }
 
-static void recvpacket(int sock, int recvmsg_flags,
-		       Config *cfg, Packets *pkts,
-		       __s32 tx_seq)
-{
-	char data[256];
-	struct msghdr msg;
-	struct iovec entry;
-	struct sockaddr_in from_addr;
-	struct {
-		struct cmsghdr cm;
-		char control[512];
-	} control;
-	int res;
-
-	memset(&msg, 0, sizeof(msg));
-	msg.msg_iov = &entry;
-	msg.msg_iovlen = 1;
-	entry.iov_base = data;
-	entry.iov_len = sizeof(data);
-	memset(data, 0, sizeof(data));
-	msg.msg_name = (caddr_t)&from_addr;
-	msg.msg_namelen = sizeof(from_addr);
-	msg.msg_control = &control;
-	msg.msg_controllen = sizeof(control);
-
-	res = recvmsg(sock, &msg, recvmsg_flags | MSG_DONTWAIT);
-	if (res >= 0)
-		parse_and_save_tstamp(&msg, res, recvmsg_flags, res, cfg, pkts, tx_seq);
-}
-
-void *rcv_pkt(void *arg)
-{
-	struct thread_data *data = arg;
-	int sock = data->sockfd;
-	fd_set readfs, errorfs;
-	int res;
-
-
-	while (running) {
-		FD_ZERO(&readfs);
-		FD_ZERO(&errorfs);
-		FD_SET(sock, &readfs);
-		FD_SET(sock, &errorfs);
-
-		struct timeval tv = {0, 100000};   // sleep for ten minutes!
-		res = select(sock + 1, &readfs, 0, &errorfs, &tv);
-		/*res = select(sock + 1, &readfs, 0, &errorfs, NULL);*/
-		if (res > 0) {
-			recvpacket(sock, 0, data->cfg, data->pkts, -1);
-		}
-	}
-
-}
-
-void rcv_xmit_tstamp(int sock, Config *cfg, Packets *pkts, __u16 tx_seq) {
-	fd_set readfs, errorfs;
-	int res;
-
-	while (!pkts->txcount_flag) {
-		FD_ZERO(&readfs);
-		FD_ZERO(&errorfs);
-		FD_SET(sock, &readfs);
-		FD_SET(sock, &errorfs);
-
-		res = select(sock + 1, &readfs, 0, &errorfs, NULL);
-		if (res > 0) {
-			recvpacket(sock, 0, cfg, pkts, tx_seq);
-			recvpacket(sock, MSG_ERRQUEUE, cfg, pkts, tx_seq);
-		}
-	}
-
-	return;
-}
-
 /* ======= Sending ======= */
-
-static int do_send_one(int fdt, int length)
-{
-	char control[CMSG_SPACE(sizeof(uint64_t))];
-	struct msghdr msg = {0};
-	struct iovec iov = {0};
-	struct cmsghdr *cm;
-	uint64_t tdeliver;
-	int ret;
-	char *buf;
-
-	buf = (char *)malloc(length);
-	memcpy(buf, sync_packet, sizeof(sync_packet));
-
-	iov.iov_base = buf;
-	iov.iov_len = length;
-
-	msg.msg_iov = &iov;
-	msg.msg_iovlen = 1;
-
-	ret = sendmsg(fdt, &msg, 0);
-	if (ret == -1)
-		printf("error write, return error sendmsg!\n");
-	if (ret == 0)
-		printf("error write: 0B");
-
-	free(buf);
-	return ret;
-}
 
 static void pkts_append_seq(Packets *pkts, __u16 tx_seq)
 {
@@ -483,12 +309,9 @@ static void pkts_append_seq(Packets *pkts, __u16 tx_seq)
 	pthread_mutex_unlock(&pkts->list_lock);
 }
 
-static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
-			Config *cfg, Packets *pkts)
+__u16 prepare_packet(Config *cfg, Packets *pkts)
 {
-	struct timeval now, nowb;
 	__u16 tx_seq;
-	int res;
 
 	tx_seq = pkts->next_seq;
 	pkts->next_seq++;
@@ -498,12 +321,17 @@ static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
 
 	pkts_append_seq(pkts, tx_seq);
 
-	gettimeofday(&nowb, 0);
+	return tx_seq;
+}
 
-	if (using_tagged(cfg))
-		res = send(sock, pkts->frame, sizeof(sync_packet_tagged), 0);
-	else
-		res = send(sock, pkts->frame, sizeof(sync_packet), 0);
+static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
+			Config *cfg, Packets *pkts)
+{
+	__u16 tx_seq;
+
+	tx_seq = prepare_packet(cfg, pkts);
+
+	send(sock, pkts->frame, pkts->frame_size, 0);
 
 	return tx_seq;
 }
@@ -632,145 +460,6 @@ void sender(int sock, unsigned char mac[ETH_ALEN], Config *cfg, Packets *pkts)
 		    && (pkts->next_seq % cfg->pkts_per_summary) == 0)
 			calculate_latency(cfg, pkts);
 	}
-}
-
-/* ======= Setup ======= */
-
-static void setsockopt_txtime(int fd)
-{
-	struct sock_txtime so_txtime_val = {
-			.clockid =  CLOCK_TAI,
-			/*.flags = SOF_TXTIME_DEADLINE_MODE | SOF_TXTIME_REPORT_ERRORS */
-			.flags = SOF_TXTIME_REPORT_ERRORS
-			};
-	struct sock_txtime so_txtime_val_read = { 0 };
-	socklen_t vallen = sizeof(so_txtime_val);
-
-	if (setsockopt(fd, SOL_SOCKET, SO_TXTIME,
-		       &so_txtime_val, sizeof(so_txtime_val)))
-		printf("setsockopt txtime error!\n");
-
-	if (getsockopt(fd, SOL_SOCKET, SO_TXTIME,
-		       &so_txtime_val_read, &vallen))
-		printf("getsockopt txtime error!\n");
-
-	if (vallen != sizeof(so_txtime_val) ||
-	    memcmp(&so_txtime_val, &so_txtime_val_read, vallen))
-		printf("getsockopt txtime: mismatch\n");
-}
-
-int setup_sock(char *interface, int prio, int st_tstamp_flags, bool ptp_only, bool one_step)
-{
-	struct hwtstamp_config hwconfig, hwconfig_requested;
-	struct sockaddr_ll addr;
-	struct ifreq hwtstamp;
-	struct ifreq device;
-	socklen_t len;
-	int sock;
-	int val;
-
-	sock = socket(PF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-	if (sock < 0)
-		bail("socket");
-
-	memset(&device, 0, sizeof(device));
-	strncpy(device.ifr_name, interface, sizeof(device.ifr_name));
-	if (ioctl(sock, SIOCGIFINDEX, &device) < 0)
-		bail("getting interface index");
-
-	/* Set the SIOCSHWTSTAMP ioctl */
-	memset(&hwtstamp, 0, sizeof(hwtstamp));
-	strncpy(hwtstamp.ifr_name, interface, sizeof(hwtstamp.ifr_name));
-	hwtstamp.ifr_data = (void *)&hwconfig;
-	memset(&hwconfig, 0, sizeof(hwconfig));
-
-	if (st_tstamp_flags & SOF_TIMESTAMPING_TX_HARDWARE) {
-		if (one_step)
-			hwconfig.tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
-		else
-			hwconfig.tx_type = HWTSTAMP_TX_ON;
-	} else {
-		hwconfig.tx_type = HWTSTAMP_TX_OFF;
-	}
-	if (ptp_only)
-		hwconfig.rx_filter =
-			(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
-			HWTSTAMP_FILTER_PTP_V2_SYNC : HWTSTAMP_FILTER_NONE;
-	else
-		hwconfig.rx_filter =
-			(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
-			HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
-
-	hwconfig_requested = hwconfig;
-	if (ioctl(sock, SIOCSHWTSTAMP, &hwtstamp) < 0) {
-		if ((errno == EINVAL || errno == ENOTSUP) &&
-		    hwconfig_requested.tx_type == HWTSTAMP_TX_OFF &&
-		    hwconfig_requested.rx_filter == HWTSTAMP_FILTER_NONE) {
-			printf("SIOCSHWTSTAMP: disabling hardware time stamping not possible\n");
-			exit(1);
-		}
-		else {
-			printf("SIOCSHWTSTAMP: operation not supported!\n");
-			exit(1);
-		}
-	}
-	printf("SIOCSHWTSTAMP: tx_type %d requested, got %d; rx_filter %d requested, got %d\n",
-	       hwconfig_requested.tx_type, hwconfig.tx_type,
-	       hwconfig_requested.rx_filter, hwconfig.rx_filter);
-
-	/* bind to PTP port */
-	addr.sll_ifindex = device.ifr_ifindex;
-	addr.sll_family = AF_PACKET;
-	addr.sll_protocol = htons(ETH_P_ALL);
-	addr.sll_pkttype = PACKET_BROADCAST;
-	addr.sll_hatype   = ARPHRD_ETHER;
-	memset(addr.sll_addr, 0, 8);
-	addr.sll_halen = 0;
-	if (bind(sock, (struct sockaddr*) &addr, sizeof(struct sockaddr_ll)) < 0)
-		bail("bind");
-	if (setsockopt(sock, SOL_SOCKET, SO_BINDTODEVICE, interface, strlen(interface)))
-		bail("setsockopt SO_BINDTODEVICE");
-	if (setsockopt(sock, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(int)))
-		bail("setsockopt SO_PRIORITY");
-
-	if (st_tstamp_flags &&
-	    setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING,
-		       &st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)
-		printf("setsockopt SO_TIMESTAMPING not supported\n");
-
-	/* verify socket options */
-	len = sizeof(val);
-
-	if (getsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING, &val, &len) < 0) {
-		printf("%s: %s\n", "getsockopt SO_TIMESTAMPING", strerror(errno));
-	} else {
-		DEBUG("SO_TIMESTAMPING %d\n", val);
-		if (val != st_tstamp_flags)
-			printf("   not the expected value %d\n", st_tstamp_flags);
-	}
-
-	setsockopt_txtime(sock);
-
-	return sock;
-}
-
-int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step)
-{
-	int so_tstamp_flags = 0;
-	so_tstamp_flags |= (SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_OPT_TSONLY);
-	so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
-	so_tstamp_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
-
-	return setup_sock(iface, prio, so_tstamp_flags, ptp_only, one_step);
-}
-
-int setup_rx_sock(char *iface, int prio, bool ptp_only)
-{
-	int so_tstamp_flags = 0;
-	so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
-	so_tstamp_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
-
-	return setup_sock(iface, prio, so_tstamp_flags, ptp_only, false);
 }
 
 void plot(Config *cfg, char *data_filename)
@@ -982,10 +671,13 @@ int main(int argc, char **argv)
 	if (err)
 		return err;
 
-	if (using_tagged(&cfg))
+	if (using_tagged(&cfg)) {
 		pkts.frame = sync_packet_tagged;
-	else
+		pkts.frame_size = sizeof(sync_packet_tagged);
+	} else {
 		pkts.frame = sync_packet;
+		pkts.frame_size = sizeof(sync_packet);
+	}
 
 	set_vid_pcp(&cfg, &pkts);
 
