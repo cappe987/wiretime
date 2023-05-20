@@ -25,7 +25,7 @@ project(wiretime VERSION 1.0)
 
 # ---- BUILD ----
 add_executable(wiretime)
-target_sources(wiretime PRIVATE src/wiretime.c)
+target_sources(wiretime PRIVATE src/timestamping.c src/wiretime.c)
 
 target_include_directories(wiretime PUBLIC ${PROJECT_INCLUDES})
 target_link_libraries(wiretime PUBLIC pthread link)

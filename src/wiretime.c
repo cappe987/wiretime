@@ -42,6 +42,7 @@
 
 #include "version.h"
 #include "liblink.h"
+#include "wiretime.h"
 
 #ifndef SO_TIMESTAMPING
 # define SO_TIMESTAMPING         37
@@ -69,51 +70,10 @@
 
 #define DOMAIN_NUM 0xff
 
-struct pkt_time {
-	__u16 seq;
-	struct timespec xmit;
-	struct timespec recv;
-};
-
-typedef struct packets {
-	pthread_mutex_t list_lock;
-	struct pkt_time *list;
-	int list_head;
-	int list_len;
-	__u16 next_seq;
-	bool txcount_flag;
-	unsigned char *frame;
-} Packets;
-
-typedef struct config {
-	int pkts_per_sec; /* Max 1000 (1 pkts per ms) */
-	int pkts_per_summary; /* Defaults to pkt_per_sec if not set*/
-	int pcp;
-	int priority;
-	int vlan;
-	bool one_step;
-	bool ptp_only;
-	bool has_first;
-	bool plot;
-	char *plot_filename;
-	struct timespec first_tstamp;
-	FILE *out_file;
-	char *out_filename;
-	char *tx_iface;
-	char *rx_iface;
-} Config;
-
-struct thread_data {
-	Config *cfg;
-	Packets *pkts;
-	int sockfd;
-};
 
 static bool debugen = false;
 static bool running = true;
 
-/*static int delay_us = 0;*/
-/*static int send_now = 0;*/
 #ifndef CLOCK_TAI
 #define CLOCK_TAI                       11
 #endif
@@ -336,12 +296,28 @@ static int is_rx_tstamp(unsigned char *buf)
 
 /* ======= Receiving ======= */
 
+static struct timespec get_one_step(Packets *pkts, int idx, unsigned char *data, __u16 pkt_seq)
+{
+	struct timespec one_step_ts;
+
+	// XXX: Assumes 64-bit time
+	// Since we need the lower 6 bytes, copy 8 and set the upper 2 to zero.
+	memcpy(&one_step_ts.tv_sec, &data[TIME_SEC_OFFSET-2], 8);
+	memset(&one_step_ts.tv_sec, 0, 2);
+	memcpy(&one_step_ts.tv_nsec, &data[TIME_NSEC_OFFSET], 4);
+	one_step_ts.tv_sec = be64toh(one_step_ts.tv_sec);
+	one_step_ts.tv_nsec = ntohl(one_step_ts.tv_nsec);
+	if (pkts->list[idx].seq == pkt_seq)
+		pkts->list[idx].xmit = one_step_ts;
+	DEBUG("Got TX one-step seq %d. %lu.%lu\n", pkt_seq, one_step_ts.tv_sec, one_step_ts.tv_nsec);
+
+	return one_step_ts;
+}
+
 static void parse_and_save_tstamp(struct msghdr *msg, int res,
 				  int recvmsg_flags, size_t length,
 				  Config *cfg, Packets *pkts, __s32 tx_seq)
 {
-	struct sockaddr_in *from_addr = (struct sockaddr_in *)msg->msg_name;
-	struct cmsghdr *cmsg;
 	struct timespec *stamp = NULL;
 	struct timespec one_step_ts;
 	__u16 pkt_seq;
@@ -350,37 +326,7 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 	int got_tx = 0;
 	int got_rx = 0;
 
-	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
-		switch (cmsg->cmsg_level) {
-		case SOL_SOCKET:
-			switch (cmsg->cmsg_type) {
-			case SO_TIMESTAMPING: {
-				stamp = (struct timespec *)CMSG_DATA(cmsg);
-				/* stamp is an array containing 3 timespecs:
-				 * SW, HW transformed, HW raw.
-				 * Only HW raw is set
-				 */
-				/* skip SW */
-				stamp++;
-				/* skip deprecated HW transformed */
-				stamp++;
-				if (recvmsg_flags & MSG_ERRQUEUE)
-					pkts->txcount_flag = 1;
-				break;
-			}
-			default:
-				/*DEBUG("type %d\n", cmsg->cmsg_type);*/
-				break;
-			}
-			break;
-		default:
-			/*DEBUG("level %d type %d\n",*/
-				/*cmsg->cmsg_level,*/
-				/*cmsg->cmsg_type);*/
-			break;
-		}
-	}
-
+	get_timestamp(msg, &stamp, recvmsg_flags, pkts);
 	if (!stamp)
 		return;
 
@@ -405,18 +351,8 @@ static void parse_and_save_tstamp(struct msghdr *msg, int res,
 
 	idx = pkt_seq % pkts->list_len;
 
-	if (got_rx && cfg->one_step) {
-		// XXX: Assumes 64-bit time
-		// Since we need the lower 6 bytes, copy 8 and set the upper 2 to zero.
-		memcpy(&one_step_ts.tv_sec, &data[TIME_SEC_OFFSET-2], 8);
-		memset(&one_step_ts.tv_sec, 0, 2);
-		memcpy(&one_step_ts.tv_nsec, &data[TIME_NSEC_OFFSET], 4);
-		one_step_ts.tv_sec = be64toh(one_step_ts.tv_sec);
-		one_step_ts.tv_nsec = ntohl(one_step_ts.tv_nsec);
-		if (pkts->list[idx].seq == pkt_seq)
-			pkts->list[idx].xmit = one_step_ts;
-		DEBUG("Got TX one-step seq %d. %lu.%lu\n", pkt_seq, one_step_ts.tv_sec, one_step_ts.tv_nsec);
-	}
+	if (got_rx && cfg->one_step)
+		one_step_ts = get_one_step(pkts, idx, data, pkt_seq);
 
 	if (!cfg->has_first) {
 		cfg->has_first = 1;
@@ -709,9 +645,6 @@ static void setsockopt_txtime(int fd)
 			};
 	struct sock_txtime so_txtime_val_read = { 0 };
 	socklen_t vallen = sizeof(so_txtime_val);
-
-	/*if (send_now)*/
-		/*so_txtime_val.flags |= SOF_TXTIME_DEADLINE_MODE;*/
 
 	if (setsockopt(fd, SOL_SOCKET, SO_TXTIME,
 		       &so_txtime_val, sizeof(so_txtime_val)))
