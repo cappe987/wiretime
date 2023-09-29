@@ -56,6 +56,7 @@ extern bool debugen;// = false;
 extern bool running;// = true;
 
 struct pkt_time {
+	bool invalid;
 	__u16 seq;
 	struct timespec xmit;
 	struct timespec recv;
@@ -64,20 +65,26 @@ struct pkt_time {
 typedef struct packets {
 	pthread_mutex_t list_lock;
 	struct pkt_time *list;
+	int list_start;
 	int list_head;
 	int list_len;
 	__u16 next_seq;
 	bool txcount_flag;
 	unsigned char *frame;
 	size_t frame_size;
+	int timerfd;
+	int triggers_behind_timer;
 } Packets;
 
 typedef struct config {
-	int pkts_per_sec; /* Max 1000 (1 pkts per ms) */
-	int pkts_per_summary; /* Defaults to pkt_per_sec if not set*/
+	//int pkts_per_sec; /* Max 1000 (1 pkt per ms) */
+	int interval; /* Milliseconds. */
+	//int pkts_per_summary; /* Defaults to pkt_per_sec if not set*/
+	int batch_size; /* Default: 1 */
 	int pcp;
 	int priority;
 	int vlan;
+	bool software_ts;
 	bool one_step;
 	bool ptp_only;
 	bool has_first;
@@ -100,8 +107,8 @@ struct thread_data {
 void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts);
 void *rcv_pkt(void *arg);
 void rcv_xmit_tstamp(int sock, Config *cfg, Packets *pkts, __u16 tx_seq);
-int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step);
-int setup_rx_sock(char *iface, int prio, bool ptp_only);
+int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step, bool software_ts);
+int setup_rx_sock(char *iface, int prio, bool ptp_only, bool software_ts);
 
 /* wiretime.c */
 void save_tstamp(struct timespec *stamp, unsigned char *data, size_t length,
