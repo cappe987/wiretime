@@ -75,6 +75,7 @@ typedef struct packets {
 typedef struct config {
 	int pkts_per_sec; /* Max 1000 (1 pkts per ms) */
 	int pkts_per_summary; /* Defaults to pkt_per_sec if not set*/
+	int cycles_delayed;
 	int pcp;
 	int priority;
 	int vlan;

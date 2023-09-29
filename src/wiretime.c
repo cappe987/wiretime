@@ -8,10 +8,15 @@
  * application transmits a lot of data on the same interface.
  *
  * TODO: Don't allow mixing one-step and tagged VLAN. One-step assumes the
- * packet is not tagged.
+ * packet is not tagged on some (all?) timestamping engines. So the timestamp
+ * may be written to the wrong location, or not at all.
  *
  * TODO: PHY timestamping with only a looped cable reports earlier RX time than
  * TX time. Possibly hardware related issue.
+ *
+ * TODO: Doing 100's of packets per second on laptop (e1000e driver, single
+ * port) causes certain packets to not have their timestamp fetched on RX. Not
+ * sure if other devices are affected.
  */
 
 #include <stdio.h>
@@ -44,10 +49,8 @@
 
 #define DOMAIN_NUM 0xff
 
-
 bool debugen = false;
 bool running = true;
-
 
 void help()
 {
@@ -175,11 +178,11 @@ static unsigned char sync_packet_tagged[] = {
 	0x00, 0x00, 0x00, 0x00, // originTimestamp (nanoseconds)
 };
 
-void u16_to_char(unsigned char a[], __u16 n) {
+static void u16_to_char(unsigned char a[], __u16 n) {
 	memcpy(a, &n, 2);
 }
 
-__u16 char_to_u16(unsigned char a[]) {
+static __u16 char_to_u16(unsigned char a[]) {
 	__u16 n = 0;
 	memcpy(&n, a, 2);
 	return n;
@@ -296,6 +299,9 @@ void save_tstamp(struct timespec *stamp, unsigned char *data, size_t length,
 		else if (got_rx)
 			pkts->list[idx].recv = *stamp;
 	}
+	/*if (pkts->list[idx].xmit.tv_sec != 0 && pkts->list[idx].recv.tv_sec != 0)*/
+		/*printf("Got both packets for seq %d\n", pkt_seq);*/
+
 	pthread_mutex_unlock(&pkts->list_lock);
 }
 
@@ -389,14 +395,24 @@ void calculate_latency(Config *cfg, Packets *pkts)
 	 * packets so the first 5 are hopefully available. From there
 	 * on it can do summary at 15, 20, 25, etc.
 	 */
-	int stop = (pkts->next_seq + cfg->pkts_per_summary) % pkts->list_len;
-	int i = pkts->next_seq % pkts->list_len;
+
+	int pkts_delayed = cfg->cycles_delayed * cfg->pkts_per_summary;
+	int i = pkts->next_seq - (pkts_delayed + cfg->pkts_per_summary);
+	int stop = pkts->next_seq - pkts_delayed;
+
+	i = i < 0 ? i + 65536 : i;
+	stop = stop < 0 ? stop + 65536 : stop;
+
+
 	struct timespec diff;
 	struct timespec first_interval;
 	int first_iteration = 1;
 	__u64 total_nsec = 0;
 	__u64 nsec;
 	int lost = 0;
+
+	/*printf("------------\n");*/
+	printf("Nextseq %d. i %d. Stop %d. Len %d. pkts_del %d\n", pkts->next_seq, i, stop, pkts->list_len, pkts_delayed);
 
 	pthread_mutex_lock(&pkts->list_lock);
 	for (; i != (stop % pkts->list_len); i = (i+1) % pkts->list_len) {
@@ -456,7 +472,7 @@ void sender(int sock, unsigned char mac[ETH_ALEN], Config *cfg, Packets *pkts)
 		 * sending the first interval. Average is always calculated one
 		 * interval after the final packet of that interval was sent.
 		 */
-		if (pkts->next_seq > (__u16)cfg->pkts_per_summary
+		if (pkts->next_seq > (__u16)(cfg->pkts_per_summary * cfg->cycles_delayed)
 		    && (pkts->next_seq % cfg->pkts_per_summary) == 0)
 			calculate_latency(cfg, pkts);
 	}
@@ -525,15 +541,22 @@ static int parse_args(int argc, char **argv, Config *cfg)
 		{ "pkts_per_sec",     required_argument, NULL,    's' },
 		{ "out",              required_argument, NULL,    'O' },
 		{ "plot",             required_argument, NULL,    '1' },
+		{ "cycles_delayed",   required_argument, NULL,    'c' },
 		{ "one-step",         no_argument,       NULL,    'o' },
 		{ "tstamp-all",       no_argument,       NULL,    '2' },
 		{ "debug",            no_argument,       NULL,    'd' },
 		{ NULL,               0,                 NULL,     0  }
 	};
 
-	while ((c = getopt_long(argc, argv, "O:S:s:P:p:v:r:t:hdV", long_options, &opt_index)) != -1) {
+	while ((c = getopt_long(argc, argv, "c:O:S:s:P:p:v:r:t:hdV", long_options, &opt_index)) != -1) {
 		switch (c)
 		{
+			case 'c':
+				cfg->cycles_delayed = strtol(optarg, NULL, 0);
+				if (cfg->cycles_delayed <= 0) {
+					bail("Cycles delayed must be greater than 0");
+				}
+				break;
 			case 'O':
 				cfg->out_filename = optarg;
 				break;
@@ -656,6 +679,7 @@ int main(int argc, char **argv)
 	cfg.ptp_only = true;
 	cfg.pkts_per_sec = 100;
 	cfg.pkts_per_summary = 0;
+	cfg.cycles_delayed = 1;
 	cfg.out_file = NULL;
 	cfg.pcp  = 0;
 	cfg.vlan = 0;
@@ -705,7 +729,7 @@ int main(int argc, char **argv)
 	signal(SIGINT, sig_handler);
 	pthread_mutex_init(&pkts.list_lock, NULL);
 	/* pktlist is a circular buffer with space for two intervals of packets */
-	pkts.list_len = cfg.pkts_per_summary * 2;
+	pkts.list_len = 65536;// cfg.pkts_per_summary * 2;
 	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
 	if (!pkts.list)
 		return ENOMEM;

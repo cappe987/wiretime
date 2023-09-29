@@ -11,12 +11,25 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 #include <linux/if_arp.h>
-
 #include <asm/types.h>
-
 #include <linux/net_tstamp.h>
+#include <pthread.h>
 
 #include "wiretime.h"
+
+static __u16 char_to_u16(unsigned char a[]) {
+	__u16 n = 0;
+	memcpy(&n, a, 2);
+	return n;
+}
+static __u16 get_sequenceId(unsigned char *buf)
+{
+	// Will arive without tag when received on the socket
+	/*if (using_tagged())*/
+		/*return char_to_u16(&buf[SEQ_OFFSET + VLAN_TAG_SIZE]);*/
+	/*else*/
+		return ntohs(char_to_u16(&buf[44]));
+}
 
 
 void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts)
@@ -24,11 +37,14 @@ void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flag
 	struct sockaddr_in *from_addr = (struct sockaddr_in *)msg->msg_name;
 	struct cmsghdr *cmsg;
 
+	int pkt_seq = get_sequenceId(msg->msg_iov->iov_base);
+	DEBUG("Seq %d\n", pkt_seq);
 	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
 		switch (cmsg->cmsg_level) {
 		case SOL_SOCKET:
 			switch (cmsg->cmsg_type) {
 			case SO_TIMESTAMPING: {
+				DEBUG("Got tstamp\n");
 				*stamp = (struct timespec *)CMSG_DATA(cmsg);
 				/* stamp is an array containing 3 timespecs:
 				 * SW, HW transformed, HW raw.
@@ -48,7 +64,7 @@ void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flag
 			}
 			break;
 		default:
-			/*DEBUG("level %d type %d\n",*/
+			/*printf("level %d type %d\n",*/
 				/*cmsg->cmsg_level,*/
 				/*cmsg->cmsg_type);*/
 			break;
@@ -83,13 +99,19 @@ static void recvpacket(int sock, int recvmsg_flags,
 	msg.msg_controllen = sizeof(control);
 
 	res = recvmsg(sock, &msg, recvmsg_flags | MSG_DONTWAIT);
+	/*if (tx_seq < 0) {*/
+		/*int pkt_seq = get_sequenceId(msg.msg_iov->iov_base);*/
+		/*printf("Recv seq %d\n", pkt_seq);*/
+	/*}*/
 	if (res >= 0) {
 		get_timestamp(&msg, &stamp, recvmsg_flags, pkts);
 		if (!stamp)
-			return;
+			goto out;
 		save_tstamp(stamp, msg.msg_iov->iov_base,
 			    res, cfg, pkts, tx_seq, recvmsg_flags);
 	}
+out:
+	return;
 }
 
 void *rcv_pkt(void *arg)
