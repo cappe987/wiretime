@@ -456,7 +456,7 @@ void *sender(void *args)
 	/*int delay_us = 1000 * (1000 / cfg->pkts_per_sec);*/
 	int delay_us = cfg->interval * 1000;
 
-	while (running) {
+	/*while (running) {*/
 		 /*write one packet */
 		tx_seq = sendpacket(sock, length, cfg, pkts);
 		pkts->txcount_flag = 0;
@@ -468,7 +468,7 @@ void *sender(void *args)
 		 /* Receive xmit timestamp for packet */
 		if (!cfg->one_step)
 			rcv_xmit_tstamp(sock, cfg, pkts, tx_seq);
-		usleep(delay_us);
+		/*usleep(delay_us);*/
 
 		/* The first condition checks that it has transmitted more than
 		 * one interval, so we don't check the average right after
@@ -478,7 +478,7 @@ void *sender(void *args)
 		/*if (pkts->next_seq > (__u16)cfg->pkts_per_summary*/
 		    /*&& (pkts->next_seq % cfg->pkts_per_summary) == 0)*/
 			/*calculate_latency(cfg, pkts);*/
-	}
+	/*}*/
 }
 
 void plot(Config *cfg, char *data_filename)
@@ -754,23 +754,23 @@ int main(int argc, char **argv)
 
 	printf("Triggers behind: %d\n", pkts.triggers_behind_timer);
 
-//	pkts.list_len = 65536;
-//	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
-//	if (!pkts.list)
-//		return ENOMEM;
-//
-//	/* Receiver */
-//	rx_args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only, cfg.software_ts);
-//	rx_args.cfg = &cfg;
-//	rx_args.pkts = &pkts;
-//	pthread_create(&rx_thread, NULL, rcv_pkt, &rx_args);
-//
-//	/* Sender */
-//	tx_args.sockfd = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step, cfg.software_ts);
-//	get_smac(tx_sock, cfg.tx_iface, mac);
-//	set_smac(pkts.frame, mac);
-//	tx_args.cfg = &cfg;
-//	tx_args.pkts = &pkts;
+	pkts.list_len = 65536;
+	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
+	if (!pkts.list)
+		return ENOMEM;
+
+	/* Receiver */
+	rx_args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only, cfg.software_ts);
+	rx_args.cfg = &cfg;
+	rx_args.pkts = &pkts;
+	pthread_create(&rx_thread, NULL, rcv_pkt, &rx_args);
+
+	/* Sender */
+	tx_args.sockfd = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step, cfg.software_ts);
+	get_smac(tx_sock, cfg.tx_iface, mac);
+	set_smac(pkts.frame, mac);
+	tx_args.cfg = &cfg;
+	tx_args.pkts = &pkts;
 	/*pthread_create(&tx_thread, NULL, sender, &tx_args);*/
 
 	/* Main loop */
@@ -818,7 +818,7 @@ int main(int argc, char **argv)
 			read(pkts.timerfd, dummybuf, 8);
 
 		/*pkts.next_seq++;*/
-		/*sender(&tx_args);*/
+		sender(&tx_args);
 		triggers++;
 		current_batch++;
 

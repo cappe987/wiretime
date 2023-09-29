@@ -104,7 +104,7 @@ struct thread_data {
 };
 
 /* timestamping.c */
-void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts);
+void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts, Config *cfg);
 void *rcv_pkt(void *arg);
 void rcv_xmit_tstamp(int sock, Config *cfg, Packets *pkts, __u16 tx_seq);
 int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step, bool software_ts);

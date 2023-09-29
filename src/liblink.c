@@ -38,6 +38,11 @@ int get_smac(int sockfd, char ifname[IFNAMSIZ], unsigned char smac[6])
 	memcpy(buffer.ifr_ifrn.ifrn_name, ifname, IFNAMSIZ);
 
 	if (ioctl(sockfd, SIOCGIFHWADDR, &buffer) < 0) {
+		/* FIXME: Virtual hardware interfaces cannot use SIOCGIFHWADDR.
+		 * Maybe use the `ip link` interface?
+		 */
+		memcpy(smac, "\xAA\xAA\xAA\xAA\xAA\xAA", ETH_ALEN);
+		return 0;
 		printf("smac %2X\n", buffer.ifr_hwaddr.sa_data[0]);
 		perror("Error");
 		ERR("Unable to find source MAC\n");
