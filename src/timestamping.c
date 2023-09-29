@@ -19,7 +19,7 @@
 #include "wiretime.h"
 
 
-void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts)
+void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts, Config *cfg)
 {
 	struct sockaddr_in *from_addr = (struct sockaddr_in *)msg->msg_name;
 	struct cmsghdr *cmsg;
@@ -32,12 +32,14 @@ void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flag
 				*stamp = (struct timespec *)CMSG_DATA(cmsg);
 				/* stamp is an array containing 3 timespecs:
 				 * SW, HW transformed, HW raw.
-				 * Only HW raw is set
+				 * Use SW or HW raw
 				 */
-				/* skip SW */
-				(*stamp)++;
-				/* skip deprecated HW transformed */
-				(*stamp)++;
+				if (!cfg->software_ts) {
+					/* skip SW */
+					(*stamp)++;
+					/* skip deprecated HW transformed */
+					(*stamp)++;
+				}
 				if (recvmsg_flags & MSG_ERRQUEUE)
 					pkts->txcount_flag = 1;
 				break;
@@ -84,7 +86,8 @@ static void recvpacket(int sock, int recvmsg_flags,
 
 	res = recvmsg(sock, &msg, recvmsg_flags | MSG_DONTWAIT);
 	if (res >= 0) {
-		get_timestamp(&msg, &stamp, recvmsg_flags, pkts);
+		get_timestamp(&msg, &stamp, recvmsg_flags, pkts, cfg);
+		printf("Time %ld.%ld\n", stamp->tv_sec, stamp->tv_nsec);
 		if (!stamp)
 			return;
 		save_tstamp(stamp, msg.msg_iov->iov_base,
@@ -236,10 +239,17 @@ int setup_sock(char *interface, int prio, int st_tstamp_flags,
 	if (setsockopt(sock, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(int)))
 		bail("setsockopt SO_PRIORITY");
 
-	if (st_tstamp_flags &&
-	    setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING,
-		       &st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)
-		printf("setsockopt SO_TIMESTAMPING not supported\n");
+	/*if (software_ts) {*/
+		/*if (st_tstamp_flags &&*/
+		    /*setsockopt(sock, SOL_SOCKET, SO_TIMESTAMP,*/
+			       /*&st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)*/
+			/*printf("setsockopt SO_TIMESTAMP not supported\n");*/
+	/*} else {*/
+		if (st_tstamp_flags &&
+		    setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING,
+			       &st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)
+			printf("setsockopt SO_TIMESTAMPING not supported\n");
+	/*}*/
 
 	/* verify socket options */
 	len = sizeof(val);
@@ -264,6 +274,7 @@ int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step, bool soft
 	if (software_ts) {
 		so_tstamp_flags |= (SOF_TIMESTAMPING_TX_SOFTWARE | SOF_TIMESTAMPING_OPT_TSONLY);
 		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_OPT_CMSG);
+		so_tstamp_flags |= SOF_TIMESTAMPING_SOFTWARE;
 	} else {
 		so_tstamp_flags |= (SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_OPT_TSONLY);
 		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
@@ -279,6 +290,7 @@ int setup_rx_sock(char *iface, int prio, bool ptp_only, bool software_ts)
 
 	if (software_ts) {
 		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_OPT_CMSG);
+		so_tstamp_flags |= SOF_TIMESTAMPING_SOFTWARE;
 	}
 	else {
 		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
