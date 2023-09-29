@@ -8,10 +8,15 @@
  * application transmits a lot of data on the same interface.
  *
  * TODO: Don't allow mixing one-step and tagged VLAN. One-step assumes the
- * packet is not tagged.
+ * packet is not tagged on some (all?) timestamping engines. So the timestamp
+ * may be written to the wrong location, or not at all.
  *
  * TODO: PHY timestamping with only a looped cable reports earlier RX time than
  * TX time. Possibly hardware related issue.
+ *
+ * TODO: Doing 100's of packets per second on laptop (e1000e driver, single
+ * port) causes certain packets to not have their timestamp fetched on RX. Not
+ * sure if other devices are affected.
  */
 
 #include <stdio.h>
@@ -25,6 +30,9 @@
 #include <net/if.h>
 #include <signal.h>
 #include <getopt.h>
+#include <sys/timerfd.h>
+#include <sys/eventfd.h>
+#include <fcntl.h>
 
 #include <asm/types.h>
 
@@ -98,6 +106,16 @@ void help()
 		/*"\n"*/
 		,stderr);
 
+}
+
+static void u16_to_char(unsigned char a[], __u16 n) {
+	memcpy(a, &n, 2);
+}
+
+static __u16 char_to_u16(unsigned char a[]) {
+	__u16 n = 0;
+	memcpy(&n, a, 2);
+	return n;
 }
 
 static void debug_packet_data(size_t length, uint8_t *data)
@@ -174,16 +192,6 @@ static unsigned char sync_packet_tagged[] = {
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // originTimestamp (seconds)
 	0x00, 0x00, 0x00, 0x00, // originTimestamp (nanoseconds)
 };
-
-void u16_to_char(unsigned char a[], __u16 n) {
-	memcpy(a, &n, 2);
-}
-
-__u16 char_to_u16(unsigned char a[]) {
-	__u16 n = 0;
-	memcpy(&n, a, 2);
-	return n;
-}
 
 static inline int using_tagged(Config *cfg)
 {
@@ -324,7 +332,7 @@ __u16 prepare_packet(Config *cfg, Packets *pkts)
 	return tx_seq;
 }
 
-static __u16 sendpacket(int sock, unsigned int length, unsigned char *mac,
+static __u16 sendpacket(int sock, unsigned int length,
 			Config *cfg, Packets *pkts)
 {
 	__u16 tx_seq;
@@ -375,77 +383,88 @@ bool try_get_latency(Packets *pkts, int idx, __u64 *ns)
 	return ret;
 }
 
-void calculate_latency(Config *cfg, Packets *pkts)
+//void calculate_latency(Config *cfg, Packets *pkts)
+//{
+//
+//	/* pktlist holds packets for two full intervals. This allows 1-2
+//	 * intervals for the packets to come back and have their latency
+//	 * measured. When the list is full it takes the earliest half of the
+//	 * packets and calculates their average and sets their values to zero
+//	 * so it can use those for the next transmission interval.
+//	 *
+//	 * Must have sent more than pkts_per_summary to qualify. If the
+//	 * limit is 5 then it should wait until it has sent out 10
+//	 * packets so the first 5 are hopefully available. From there
+//	 * on it can do summary at 15, 20, 25, etc.
+//	 */
+//	int stop = (pkts->next_seq + cfg->pkts_per_summary) % pkts->list_len;
+//	int i = pkts->next_seq % pkts->list_len;
+//	struct timespec diff;
+//	struct timespec first_interval;
+//	int first_iteration = 1;
+//	__u64 total_nsec = 0;
+//	__u64 nsec;
+//	int lost = 0;
+//
+//	pthread_mutex_lock(&pkts->list_lock);
+//	for (; i != (stop % pkts->list_len); i = (i+1) % pkts->list_len) {
+//		if (first_iteration) {
+//			first_iteration = 0;
+//			first_interval = pkts->list[i].xmit;
+//		}
+//
+//		if (try_get_latency(pkts, i, &nsec))
+//			total_nsec += nsec;
+//		else
+//			lost++;
+//	}
+//	pthread_mutex_unlock(&pkts->list_lock);
+//
+//	if (cfg->pkts_per_summary == lost) {
+//		printf("Lost all packets\n");
+//		if (!cfg->out_file)
+//			return;
+//		fprintf(cfg->out_file, "\n");
+//	} else {
+//		int pkts_got = cfg->pkts_per_summary - lost;
+//		__u64 avg_ns = (total_nsec/pkts_got);
+//		__u64 avg_us = avg_ns / 1000;
+//		__u64 avg_ms = avg_us / 1000;
+//		diff = diff_timespec(&first_interval, &cfg->first_tstamp);
+//		__u64 offset_ms = diff.tv_nsec / 1000000;
+//		__u64 offset_s = diff.tv_sec;
+//		printf("%llu.%03llu: Avg: %3llu ms. %3llu us. %3llu ns. Lost: %d/%d\n",
+//			offset_s, offset_ms,
+//			avg_ms, avg_us % 1000, avg_ns % 1000,
+//			lost, cfg->pkts_per_summary);
+//
+//		if (!cfg->out_file)
+//			return;
+//		fprintf(cfg->out_file, "%llu.%03llu %09llu\n", offset_s, offset_ms, avg_ns);
+//	}
+//}
+
+void *sender(void *args)
 {
+	struct thread_data *data = args;
+	int sock = data->sockfd;
+	Config *cfg = data->cfg;
+	Packets *pkts = data->pkts;
 
-	/* pktlist holds packets for two full intervals. This allows 1-2
-	 * intervals for the packets to come back and have their latency
-	 * measured. When the list is full it takes the earliest half of the
-	 * packets and calculates their average and sets their values to zero
-	 * so it can use those for the next transmission interval.
-	 *
-	 * Must have sent more than pkts_per_summary to qualify. If the
-	 * limit is 5 then it should wait until it has sent out 10
-	 * packets so the first 5 are hopefully available. From there
-	 * on it can do summary at 15, 20, 25, etc.
-	 */
-	int stop = (pkts->next_seq + cfg->pkts_per_summary) % pkts->list_len;
-	int i = pkts->next_seq % pkts->list_len;
-	struct timespec diff;
-	struct timespec first_interval;
-	int first_iteration = 1;
-	__u64 total_nsec = 0;
-	__u64 nsec;
-	int lost = 0;
-
-	pthread_mutex_lock(&pkts->list_lock);
-	for (; i != (stop % pkts->list_len); i = (i+1) % pkts->list_len) {
-		if (first_iteration) {
-			first_iteration = 0;
-			first_interval = pkts->list[i].xmit;
-		}
-
-		if (try_get_latency(pkts, i, &nsec))
-			total_nsec += nsec;
-		else
-			lost++;
-	}
-	pthread_mutex_unlock(&pkts->list_lock);
-
-	if (cfg->pkts_per_summary == lost) {
-		printf("Lost all packets\n");
-		if (!cfg->out_file)
-			return;
-		fprintf(cfg->out_file, "\n");
-	} else {
-		int pkts_got = cfg->pkts_per_summary - lost;
-		__u64 avg_ns = (total_nsec/pkts_got);
-		__u64 avg_us = avg_ns / 1000;
-		__u64 avg_ms = avg_us / 1000;
-		diff = diff_timespec(&first_interval, &cfg->first_tstamp);
-		__u64 offset_ms = diff.tv_nsec / 1000000;
-		__u64 offset_s = diff.tv_sec;
-		printf("%llu.%03llu: Avg: %3llu ms. %3llu us. %3llu ns. Lost: %d/%d\n",
-			offset_s, offset_ms,
-			avg_ms, avg_us % 1000, avg_ns % 1000,
-			lost, cfg->pkts_per_summary);
-
-		if (!cfg->out_file)
-			return;
-		fprintf(cfg->out_file, "%llu.%03llu %09llu\n", offset_s, offset_ms, avg_ns);
-	}
-}
-
-void sender(int sock, unsigned char mac[ETH_ALEN], Config *cfg, Packets *pkts)
-{
 	int length = 0;
 	__u16 tx_seq;
-	int delay_us = 1000 * (1000 / cfg->pkts_per_sec);
+	/*int delay_us = 1000 * (1000 / cfg->pkts_per_sec);*/
+	int delay_us = cfg->interval * 1000;
 
 	while (running) {
 		 /*write one packet */
-		tx_seq = sendpacket(sock, length, mac, cfg, pkts);
+		tx_seq = sendpacket(sock, length, cfg, pkts);
 		pkts->txcount_flag = 0;
+
+		// TODO: Move this part onto the rx thread (rcv_pkt function)?
+		// That way the sender can focus purely on sending and the
+		// receiver can handle all timestamp readouts.
+
 		 /* Receive xmit timestamp for packet */
 		if (!cfg->one_step)
 			rcv_xmit_tstamp(sock, cfg, pkts, tx_seq);
@@ -456,9 +475,9 @@ void sender(int sock, unsigned char mac[ETH_ALEN], Config *cfg, Packets *pkts)
 		 * sending the first interval. Average is always calculated one
 		 * interval after the final packet of that interval was sent.
 		 */
-		if (pkts->next_seq > (__u16)cfg->pkts_per_summary
-		    && (pkts->next_seq % cfg->pkts_per_summary) == 0)
-			calculate_latency(cfg, pkts);
+		/*if (pkts->next_seq > (__u16)cfg->pkts_per_summary*/
+		    /*&& (pkts->next_seq % cfg->pkts_per_summary) == 0)*/
+			/*calculate_latency(cfg, pkts);*/
 	}
 }
 
@@ -531,7 +550,7 @@ static int parse_args(int argc, char **argv, Config *cfg)
 		{ NULL,               0,                 NULL,     0  }
 	};
 
-	while ((c = getopt_long(argc, argv, "O:S:s:P:p:v:r:t:hdV", long_options, &opt_index)) != -1) {
+	while ((c = getopt_long(argc, argv, "O:b:i:P:p:v:r:t:hdVSo", long_options, &opt_index)) != -1) {
 		switch (c)
 		{
 			case 'O':
@@ -539,6 +558,9 @@ static int parse_args(int argc, char **argv, Config *cfg)
 				break;
 			case 'o':
 				cfg->one_step = true;
+				break;
+			case 'S':
+				cfg->software_ts = true;
 				break;
 			case '1':
 				cfg->plot = true;
@@ -574,16 +596,16 @@ static int parse_args(int argc, char **argv, Config *cfg)
 					return EINVAL;
 				}
 				break;
-			case 's':
-				cfg->pkts_per_sec = strtoul(optarg, NULL, 0);
-				if (cfg->pkts_per_sec <= 0 || cfg->pkts_per_sec > 1000) {
-					bail("Packets per second must be 0 < x <= 1000");
+			case 'i':
+				cfg->interval = strtoul(optarg, NULL, 0);
+				if (cfg->interval <= 0) {
+					bail("Interval must be greater than 0");
 				}
 				break;
-			case 'S':
-				cfg->pkts_per_summary = strtoul(optarg, NULL, 0);
-				if (cfg->pkts_per_summary <= 0) {
-					bail("Packets per summary must be greater than 0");
+			case 'b':
+				cfg->batch_size = strtoul(optarg, NULL, 0);
+				if (cfg->batch_size <= 0 || cfg->batch_size > 32768) {
+					bail("Batch size must be a value 1-32768");
 				}
 				break;
 			case 'd':
@@ -629,20 +651,30 @@ static int parse_args(int argc, char **argv, Config *cfg)
 	}
 
 	/* If not set, default to one summary per second */
-	if (cfg->pkts_per_summary == 0)
-		cfg->pkts_per_summary = cfg->pkts_per_sec;
+	/*if (cfg->pkts_per_summary == 0)*/
+		/*cfg->pkts_per_summary = cfg->pkts_per_sec;*/
 
 
 	return 0;
+}
+
+static int make_tmp_fd(char *tmpnamebuf)
+{
+	memset(tmpnamebuf, 0, sizeof(tmpnamebuf));
+	/*cfg.out_filename = tmpnamebuf;*/
+	strncpy(tmpnamebuf, "/tmp/wiretime-XXXXXX", 20);
+	return mkstemp(tmpnamebuf);
 }
 
 int main(int argc, char **argv)
 {
 	unsigned char mac[ETH_ALEN];
 	bool using_tmpfile = false;
-	struct thread_data args;
-	pthread_t receiver;
-	char tmpnamebuf[24];
+	struct thread_data tx_args;
+	struct thread_data rx_args;
+	pthread_t rx_thread;
+	pthread_t tx_thread;
+	char tmpnamebuf[20];
 	Packets pkts;
 	Config cfg;
 	int tx_sock;
@@ -654,8 +686,8 @@ int main(int argc, char **argv)
 	cfg.has_first = false;
 	cfg.one_step = false;
 	cfg.ptp_only = true;
-	cfg.pkts_per_sec = 100;
-	cfg.pkts_per_summary = 0;
+	cfg.interval = 1000;
+	cfg.batch_size = 1;
 	cfg.out_file = NULL;
 	cfg.pcp  = 0;
 	cfg.vlan = 0;
@@ -691,10 +723,8 @@ int main(int argc, char **argv)
 
 	if (cfg.plot && !cfg.out_filename) {
 		using_tmpfile = true;
-		memset(tmpnamebuf, 0, sizeof(tmpnamebuf));
+		int fd = make_tmp_fd(tmpnamebuf);
 		cfg.out_filename = tmpnamebuf;
-		strncpy(tmpnamebuf, "/tmp/wiretime-XXXXXX", 19);
-		int fd = mkstemp(tmpnamebuf);
 		cfg.out_file = fdopen(fd, "w");
 		if (!cfg.out_file) {
 			ERR("problems creating tempfile\n");
@@ -705,30 +735,106 @@ int main(int argc, char **argv)
 	signal(SIGINT, sig_handler);
 	pthread_mutex_init(&pkts.list_lock, NULL);
 	/* pktlist is a circular buffer with space for two intervals of packets */
-	pkts.list_len = cfg.pkts_per_summary * 2;
-	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
-	if (!pkts.list)
-		return ENOMEM;
+	/* pkts is a circular buffer with space for two intervals of packets */
 
-	/* Receiver */
-	args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only);
-	args.cfg = &cfg;
-	args.pkts = &pkts;
-	pthread_create(&receiver, NULL, rcv_pkt, &args);
+	int timer_interval_ms; // = cfg.batch_size * cfg.interval;//) + 1000;
+	pkts.timerfd = timerfd_create(CLOCK_REALTIME, 0);
+	printf("Timerfd %d\n", pkts.timerfd);
+	struct itimerspec timer;
+	timer.it_value.tv_sec = cfg.interval / 1000;
+	timer.it_value.tv_nsec = (cfg.interval % 1000) * 1000000;
+	timer.it_interval.tv_sec = cfg.interval / 1000;
+	timer.it_interval.tv_nsec = (cfg.interval % 1000) * 1000000;
 
-	/* Sender */
-	tx_sock = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step);
-	get_smac(tx_sock, cfg.tx_iface, mac);
-	set_smac(pkts.frame, mac);
+	/* How many times the timer has to trigger until 1 second has passed */
+	/*pkts.triggers_behind_timer = 1000 / (cfg.batch_size * cfg.interval);*/
+	pkts.triggers_behind_timer = 0;
+	for (int i = 0; i < 1000; i += cfg.interval)
+		pkts.triggers_behind_timer++;
+
+	printf("Triggers behind: %d\n", pkts.triggers_behind_timer);
+
+//	pkts.list_len = 65536;
+//	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
+//	if (!pkts.list)
+//		return ENOMEM;
+//
+//	/* Receiver */
+//	rx_args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only, cfg.software_ts);
+//	rx_args.cfg = &cfg;
+//	rx_args.pkts = &pkts;
+//	pthread_create(&rx_thread, NULL, rcv_pkt, &rx_args);
+//
+//	/* Sender */
+//	tx_args.sockfd = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step, cfg.software_ts);
+//	get_smac(tx_sock, cfg.tx_iface, mac);
+//	set_smac(pkts.frame, mac);
+//	tx_args.cfg = &cfg;
+//	tx_args.pkts = &pkts;
+	/*pthread_create(&tx_thread, NULL, sender, &tx_args);*/
 
 	/* Main loop */
-	printf("Transmitting...\n");
-	sender(tx_sock, mac, &cfg, &pkts);
+	/*printf("Transmitting...\n");*/
+	/*sender(tx_sock, &cfg, &pkts);*/
+
+	printf("Timer %ld.%ld %ld.%ld\n", timer.it_value.tv_sec, timer.it_value.tv_nsec, timer.it_interval.tv_sec, timer.it_interval.tv_nsec);
+	timerfd_settime(pkts.timerfd, 0, &timer, NULL);
+
+	/* Wait */
+	fd_set rfds;
+	int retval;
+
+	/* Watch timerfd file descriptor */
+	FD_ZERO(&rfds);
+	/*FD_SET(0, &rfds);*/
+	FD_SET(pkts.timerfd, &rfds);
+
+	__u64 triggers = 0;
+	/* Count to ensure a whole batch has been sent when the time is reached */
+	int current_batch = 0;
+
+	char dummybuf[8];
+	/*struct timeval tv;*/
+	/*tv.tv_sec = 0;*/
+	/*tv.tv_usec = 1000000;*/
+	/*read(pkts.timerfd, dummybuf, 8);*/
+
+	while (running) {
+		printf("Trigger %llu\n", triggers);
+		retval = select(pkts.timerfd+1, &rfds, NULL, NULL, NULL); /* Last parameter = NULL --> wait forever */
+		if (retval < 0 && errno == EINTR) {
+			break;
+		}
+		if (retval < 0) {
+			perror("Error");
+			break;
+		}
+		if (retval == 0) {
+			printf("Continuing...\n");
+			continue;
+		}
+
+		if (FD_ISSET(pkts.timerfd, &rfds))
+			read(pkts.timerfd, dummybuf, 8);
+
+		/*pkts.next_seq++;*/
+		/*sender(&tx_args);*/
+		triggers++;
+		current_batch++;
+
+		if (current_batch >= cfg.batch_size && triggers > (pkts.triggers_behind_timer + cfg.batch_size)){
+			int idx = triggers-pkts.triggers_behind_timer-cfg.batch_size-1;
+			printf("Process packets %d-%d\n", idx, idx+cfg.batch_size-1);
+			current_batch = 0;
+		}
+	}
+	printf("Loop stopped\n");
 
 	/* Cleanup */
 	if (cfg.out_file)
 		fclose(cfg.out_file);
-	pthread_join(receiver, NULL);
+	/*pthread_join(rx_thread, NULL);*/
+	/*pthread_join(tx_thread, NULL);*/
 	free(pkts.list);
 
 	if (cfg.plot)

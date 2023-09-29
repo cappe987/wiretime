@@ -159,7 +159,8 @@ static void setsockopt_txtime(int fd)
 		printf("getsockopt txtime: mismatch\n");
 }
 
-int setup_sock(char *interface, int prio, int st_tstamp_flags, bool ptp_only, bool one_step)
+int setup_sock(char *interface, int prio, int st_tstamp_flags,
+	       bool ptp_only, bool one_step, bool software_ts)
 {
 	struct hwtstamp_config hwconfig, hwconfig_requested;
 	struct sockaddr_ll addr;
@@ -184,39 +185,41 @@ int setup_sock(char *interface, int prio, int st_tstamp_flags, bool ptp_only, bo
 	hwtstamp.ifr_data = (void *)&hwconfig;
 	memset(&hwconfig, 0, sizeof(hwconfig));
 
-	if (st_tstamp_flags & SOF_TIMESTAMPING_TX_HARDWARE) {
-		if (one_step)
-			hwconfig.tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
+	if (!software_ts) {
+		if (st_tstamp_flags & SOF_TIMESTAMPING_TX_HARDWARE) {
+			if (one_step)
+				hwconfig.tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
+			else
+				hwconfig.tx_type = HWTSTAMP_TX_ON;
+		} else {
+			hwconfig.tx_type = HWTSTAMP_TX_OFF;
+		}
+		if (ptp_only)
+			hwconfig.rx_filter =
+				(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
+				HWTSTAMP_FILTER_PTP_V2_SYNC : HWTSTAMP_FILTER_NONE;
 		else
-			hwconfig.tx_type = HWTSTAMP_TX_ON;
-	} else {
-		hwconfig.tx_type = HWTSTAMP_TX_OFF;
-	}
-	if (ptp_only)
-		hwconfig.rx_filter =
-			(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
-			HWTSTAMP_FILTER_PTP_V2_SYNC : HWTSTAMP_FILTER_NONE;
-	else
-		hwconfig.rx_filter =
-			(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
-			HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
+			hwconfig.rx_filter =
+				(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
+				HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
 
-	hwconfig_requested = hwconfig;
-	if (ioctl(sock, SIOCSHWTSTAMP, &hwtstamp) < 0) {
-		if ((errno == EINVAL || errno == ENOTSUP) &&
-		    hwconfig_requested.tx_type == HWTSTAMP_TX_OFF &&
-		    hwconfig_requested.rx_filter == HWTSTAMP_FILTER_NONE) {
-			printf("SIOCSHWTSTAMP: disabling hardware time stamping not possible\n");
-			exit(1);
+		hwconfig_requested = hwconfig;
+		if (ioctl(sock, SIOCSHWTSTAMP, &hwtstamp) < 0) {
+			if ((errno == EINVAL || errno == ENOTSUP) &&
+			    hwconfig_requested.tx_type == HWTSTAMP_TX_OFF &&
+			    hwconfig_requested.rx_filter == HWTSTAMP_FILTER_NONE) {
+				printf("SIOCSHWTSTAMP: disabling hardware time stamping not possible\n");
+				exit(1);
+			}
+			else {
+				printf("SIOCSHWTSTAMP: operation not supported!\n");
+				exit(1);
+			}
 		}
-		else {
-			printf("SIOCSHWTSTAMP: operation not supported!\n");
-			exit(1);
-		}
+		printf("SIOCSHWTSTAMP: tx_type %d requested, got %d; rx_filter %d requested, got %d\n",
+		       hwconfig_requested.tx_type, hwconfig.tx_type,
+		       hwconfig_requested.rx_filter, hwconfig.rx_filter);
 	}
-	printf("SIOCSHWTSTAMP: tx_type %d requested, got %d; rx_filter %d requested, got %d\n",
-	       hwconfig_requested.tx_type, hwconfig.tx_type,
-	       hwconfig_requested.rx_filter, hwconfig.rx_filter);
 
 	/* bind to PTP port */
 	addr.sll_ifindex = device.ifr_ifindex;
@@ -254,21 +257,33 @@ int setup_sock(char *interface, int prio, int st_tstamp_flags, bool ptp_only, bo
 	return sock;
 }
 
-int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step)
+int setup_tx_sock(char *iface, int prio, bool ptp_only, bool one_step, bool software_ts)
 {
 	int so_tstamp_flags = 0;
-	so_tstamp_flags |= (SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_OPT_TSONLY);
-	so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
-	so_tstamp_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
 
-	return setup_sock(iface, prio, so_tstamp_flags, ptp_only, one_step);
+	if (software_ts) {
+		so_tstamp_flags |= (SOF_TIMESTAMPING_TX_SOFTWARE | SOF_TIMESTAMPING_OPT_TSONLY);
+		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_OPT_CMSG);
+	} else {
+		so_tstamp_flags |= (SOF_TIMESTAMPING_TX_HARDWARE | SOF_TIMESTAMPING_OPT_TSONLY);
+		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
+		so_tstamp_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
+	}
+
+	return setup_sock(iface, prio, so_tstamp_flags, ptp_only, one_step, software_ts);
 }
 
-int setup_rx_sock(char *iface, int prio, bool ptp_only)
+int setup_rx_sock(char *iface, int prio, bool ptp_only, bool software_ts)
 {
 	int so_tstamp_flags = 0;
-	so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
-	so_tstamp_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
 
-	return setup_sock(iface, prio, so_tstamp_flags, ptp_only, false);
+	if (software_ts) {
+		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_SOFTWARE | SOF_TIMESTAMPING_OPT_CMSG);
+	}
+	else {
+		so_tstamp_flags |= (SOF_TIMESTAMPING_RX_HARDWARE | SOF_TIMESTAMPING_OPT_CMSG);
+		so_tstamp_flags |= SOF_TIMESTAMPING_RAW_HARDWARE;
+	}
+
+	return setup_sock(iface, prio, so_tstamp_flags, ptp_only, false, software_ts);
 }
