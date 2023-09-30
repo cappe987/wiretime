@@ -387,25 +387,11 @@ bool try_get_latency(Packets *pkts, int idx, __u64 *ns)
 void calculate_latency(Config *cfg, Packets *pkts, int start, int end)
 {
 
-	/* pktlist holds packets for two full intervals. This allows 1-2
-	 * intervals for the packets to come back and have their latency
-	 * measured. When the list is full it takes the earliest half of the
-	 * packets and calculates their average and sets their values to zero
-	 * so it can use those for the next transmission interval.
-	 *
-	 * Must have sent more than pkts_per_summary to qualify. If the
-	 * limit is 5 then it should wait until it has sent out 10
-	 * packets so the first 5 are hopefully available. From there
-	 * on it can do summary at 15, 20, 25, etc.
-	 */
-	/*int stop = (pkts->next_seq + cfg->pkts_per_summary) % pkts->list_len;*/
-	/*int i = pkts->next_seq % pkts->list_len;*/
-	struct timespec diff;
-	struct timespec first_interval;
+	struct timespec first_interval, diff;
 	int first_iteration = 1;
 	__u64 total_nsec = 0;
-	__u64 nsec;
 	int pkts_got = 0;
+	__u64 nsec;
 
 	pthread_mutex_lock(&pkts->list_lock);
 	for (int i = start; i != (end % pkts->list_len); i = (i+1) % pkts->list_len) {
@@ -443,41 +429,19 @@ void calculate_latency(Config *cfg, Packets *pkts, int start, int end)
 	}
 }
 
-void sender(Config *cfg, Packets *pkts, int sock)
+void do_xmit(Config *cfg, Packets *pkts, int sock)
 {
-	/*struct thread_data *data = args;*/
-	/*int sock = data->sockfd;*/
-	/*Config *cfg = data->cfg;*/
-	/*Packets *pkts = data->pkts;*/
-
+	int delay_us = cfg->interval * 1000;
 	int length = 0;
 	__u16 tx_seq;
-	/*int delay_us = 1000 * (1000 / cfg->pkts_per_sec);*/
-	int delay_us = cfg->interval * 1000;
 
-	/*while (running) {*/
-		 /*write one packet */
-		tx_seq = sendpacket(sock, length, cfg, pkts);
-		pkts->txcount_flag = 0;
+	 /*write one packet */
+	tx_seq = sendpacket(sock, length, cfg, pkts);
+	pkts->txcount_flag = 0;
 
-		// TODO: Move this part onto the rx thread (rcv_pkt function)?
-		// That way the sender can focus purely on sending and the
-		// receiver can handle all timestamp readouts.
-
-		 /* Receive xmit timestamp for packet */
-		if (!cfg->one_step)
-			rcv_xmit_tstamp(sock, cfg, pkts, tx_seq);
-		/*usleep(delay_us);*/
-
-		/* The first condition checks that it has transmitted more than
-		 * one interval, so we don't check the average right after
-		 * sending the first interval. Average is always calculated one
-		 * interval after the final packet of that interval was sent.
-		 */
-		/*if (pkts->next_seq > (__u16)cfg->pkts_per_summary*/
-		    /*&& (pkts->next_seq % cfg->pkts_per_summary) == 0)*/
-			/*calculate_latency(cfg, pkts);*/
-	/*}*/
+	 /* Receive xmit timestamp for packet */
+	if (!cfg->one_step)
+		rcv_xmit_tstamp(sock, cfg, pkts, tx_seq);
 }
 
 static void plot(Config *cfg, char *data_filename)
@@ -549,6 +513,19 @@ static int create_timer(Config *cfg)
 	return fd;
 }
 
+/* current_batch ensures that we have at least sent a whole
+ * batch before processing the packets. triggers_behind_timer
+ * ensures that at least 1 second has passed before a packet is
+ * processed, and in the case of larger batches, the last
+ * packet should have had at least 1 second to get around the
+ * loop.
+ */
+static bool should_process_batch(Config *cfg, __u64 triggers, int current_batch)
+{
+	return current_batch >= cfg->batch_size
+		&& triggers > (cfg->triggers_behind_timer + cfg->batch_size);
+}
+
 static int run(Config *cfg, Packets *pkts, int tx_sock)
 {
 	/* Count to ensure a whole batch has been sent when the time is reached */
@@ -557,7 +534,8 @@ static int run(Config *cfg, Packets *pkts, int tx_sock)
 	char dummybuf[8];
 	int retval = 0;
 	fd_set rfds;
-	int idx;
+	int start;
+	int end;
 
 	/* Watch timerfd file descriptor */
 	FD_ZERO(&rfds);
@@ -582,13 +560,14 @@ static int run(Config *cfg, Packets *pkts, int tx_sock)
 		if (FD_ISSET(pkts->timerfd, &rfds))
 			read(pkts->timerfd, dummybuf, 8);
 
-		sender(cfg, pkts, tx_sock);
+		do_xmit(cfg, pkts, tx_sock);
 		triggers++;
 		current_batch++;
 
-		if (current_batch >= cfg->batch_size && triggers > (pkts->triggers_behind_timer + cfg->batch_size)){
-			idx = triggers - pkts->triggers_behind_timer - cfg->batch_size - 1;
-			calculate_latency(cfg, pkts, idx, idx + cfg->batch_size);
+		if (should_process_batch(cfg, triggers, current_batch)){
+			start = (triggers - cfg->triggers_behind_timer - cfg->batch_size - 1) % pkts->list_len;
+			end = (start + cfg->batch_size) % pkts->list_len;
+			calculate_latency(cfg, pkts, start, end);
 			current_batch = 0;
 		}
 	}
@@ -792,9 +771,9 @@ int main(int argc, char **argv)
 	pthread_mutex_init(&pkts.list_lock, NULL);
 
 	/* How many times the timer has to trigger until 1 second has passed */
-	pkts.triggers_behind_timer = 0;
+	cfg.triggers_behind_timer = 0;
 	for (int i = 0; i < 1000; i += cfg.interval)
-		pkts.triggers_behind_timer++;
+		cfg.triggers_behind_timer++;
 
 	pkts.list_len = 65536;
 	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
