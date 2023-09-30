@@ -65,7 +65,6 @@ typedef struct packets {
 	unsigned char *frame;
 	size_t frame_size;
 	int timerfd;
-	int triggers_behind_timer;
 } Packets;
 
 typedef struct config {
@@ -83,6 +82,7 @@ typedef struct config {
 	bool plot;
 	char *plot_filename;
 	struct timespec first_tstamp;
+	int triggers_behind_timer;
 	FILE *out_file;
 	char *out_filename;
 	char *tx_iface;
