@@ -296,7 +296,6 @@ void save_tstamp(struct timespec *stamp, unsigned char *data, size_t length,
 		cfg->first_tstamp = cfg->one_step ? one_step_ts : *stamp;
 	}
 
-
 	pthread_mutex_lock(&pkts->list_lock);
 	if (pkts->list[idx].seq == pkt_seq) {
 		if (got_tx)
@@ -383,66 +382,64 @@ bool try_get_latency(Packets *pkts, int idx, __u64 *ns)
 	return ret;
 }
 
-//void calculate_latency(Config *cfg, Packets *pkts)
-//{
-//
-//	/* pktlist holds packets for two full intervals. This allows 1-2
-//	 * intervals for the packets to come back and have their latency
-//	 * measured. When the list is full it takes the earliest half of the
-//	 * packets and calculates their average and sets their values to zero
-//	 * so it can use those for the next transmission interval.
-//	 *
-//	 * Must have sent more than pkts_per_summary to qualify. If the
-//	 * limit is 5 then it should wait until it has sent out 10
-//	 * packets so the first 5 are hopefully available. From there
-//	 * on it can do summary at 15, 20, 25, etc.
-//	 */
-//	int stop = (pkts->next_seq + cfg->pkts_per_summary) % pkts->list_len;
-//	int i = pkts->next_seq % pkts->list_len;
-//	struct timespec diff;
-//	struct timespec first_interval;
-//	int first_iteration = 1;
-//	__u64 total_nsec = 0;
-//	__u64 nsec;
-//	int lost = 0;
-//
-//	pthread_mutex_lock(&pkts->list_lock);
-//	for (; i != (stop % pkts->list_len); i = (i+1) % pkts->list_len) {
-//		if (first_iteration) {
-//			first_iteration = 0;
-//			first_interval = pkts->list[i].xmit;
-//		}
-//
-//		if (try_get_latency(pkts, i, &nsec))
-//			total_nsec += nsec;
-//		else
-//			lost++;
-//	}
-//	pthread_mutex_unlock(&pkts->list_lock);
-//
-//	if (cfg->pkts_per_summary == lost) {
-//		printf("Lost all packets\n");
-//		if (!cfg->out_file)
-//			return;
-//		fprintf(cfg->out_file, "\n");
-//	} else {
-//		int pkts_got = cfg->pkts_per_summary - lost;
-//		__u64 avg_ns = (total_nsec/pkts_got);
-//		__u64 avg_us = avg_ns / 1000;
-//		__u64 avg_ms = avg_us / 1000;
-//		diff = diff_timespec(&first_interval, &cfg->first_tstamp);
-//		__u64 offset_ms = diff.tv_nsec / 1000000;
-//		__u64 offset_s = diff.tv_sec;
-//		printf("%llu.%03llu: Avg: %3llu ms. %3llu us. %3llu ns. Lost: %d/%d\n",
-//			offset_s, offset_ms,
-//			avg_ms, avg_us % 1000, avg_ns % 1000,
-//			lost, cfg->pkts_per_summary);
-//
-//		if (!cfg->out_file)
-//			return;
-//		fprintf(cfg->out_file, "%llu.%03llu %09llu\n", offset_s, offset_ms, avg_ns);
-//	}
-//}
+void calculate_latency(Config *cfg, Packets *pkts, int start, int end)
+{
+
+	/* pktlist holds packets for two full intervals. This allows 1-2
+	 * intervals for the packets to come back and have their latency
+	 * measured. When the list is full it takes the earliest half of the
+	 * packets and calculates their average and sets their values to zero
+	 * so it can use those for the next transmission interval.
+	 *
+	 * Must have sent more than pkts_per_summary to qualify. If the
+	 * limit is 5 then it should wait until it has sent out 10
+	 * packets so the first 5 are hopefully available. From there
+	 * on it can do summary at 15, 20, 25, etc.
+	 */
+	/*int stop = (pkts->next_seq + cfg->pkts_per_summary) % pkts->list_len;*/
+	/*int i = pkts->next_seq % pkts->list_len;*/
+	struct timespec diff;
+	struct timespec first_interval;
+	int first_iteration = 1;
+	__u64 total_nsec = 0;
+	__u64 nsec;
+	int pkts_got = 0;
+
+	pthread_mutex_lock(&pkts->list_lock);
+	for (int i = start; i != (end % pkts->list_len); i = (i+1) % pkts->list_len) {
+		if (first_iteration) {
+			first_iteration = 0;
+			first_interval = pkts->list[i].xmit;
+		}
+		if (try_get_latency(pkts, i, &nsec)) {
+			total_nsec += nsec;
+			pkts_got++;
+		}
+	}
+	pthread_mutex_unlock(&pkts->list_lock);
+
+	if (pkts_got == 0) {
+		printf("Lost all packets\n");
+		if (!cfg->out_file)
+			return;
+		fprintf(cfg->out_file, "\n");
+	} else {
+		__u64 avg_ns = (total_nsec/pkts_got);
+		__u64 avg_us = avg_ns / 1000;
+		__u64 avg_ms = avg_us / 1000;
+		diff = diff_timespec(&first_interval, &cfg->first_tstamp);
+		__u64 offset_ms = diff.tv_nsec / 1000000;
+		__u64 offset_s = diff.tv_sec;
+		printf("%llu.%03llu: Avg: %3llu ms. %3llu us. %3llu ns. Got %d/%d\n",
+			offset_s, offset_ms,
+			avg_ms, avg_us % 1000, avg_ns % 1000,
+			pkts_got, cfg->batch_size);
+
+		if (!cfg->out_file)
+			return;
+		fprintf(cfg->out_file, "%llu.%03llu %09llu\n", offset_s, offset_ms, avg_ns);
+	}
+}
 
 void *sender(void *args)
 {
@@ -739,7 +736,6 @@ int main(int argc, char **argv)
 
 	int timer_interval_ms; // = cfg.batch_size * cfg.interval;//) + 1000;
 	pkts.timerfd = timerfd_create(CLOCK_REALTIME, 0);
-	printf("Timerfd %d\n", pkts.timerfd);
 	struct itimerspec timer;
 	timer.it_value.tv_sec = cfg.interval / 1000;
 	timer.it_value.tv_nsec = (cfg.interval % 1000) * 1000000;
@@ -751,8 +747,6 @@ int main(int argc, char **argv)
 	pkts.triggers_behind_timer = 0;
 	for (int i = 0; i < 1000; i += cfg.interval)
 		pkts.triggers_behind_timer++;
-
-	printf("Triggers behind: %d\n", pkts.triggers_behind_timer);
 
 	pkts.list_len = 65536;
 	pkts.list = calloc(sizeof(struct pkt_time), pkts.list_len);
@@ -777,7 +771,6 @@ int main(int argc, char **argv)
 	/*printf("Transmitting...\n");*/
 	/*sender(tx_sock, &cfg, &pkts);*/
 
-	printf("Timer %ld.%ld %ld.%ld\n", timer.it_value.tv_sec, timer.it_value.tv_nsec, timer.it_interval.tv_sec, timer.it_interval.tv_nsec);
 	timerfd_settime(pkts.timerfd, 0, &timer, NULL);
 
 	/* Wait */
@@ -800,7 +793,7 @@ int main(int argc, char **argv)
 	/*read(pkts.timerfd, dummybuf, 8);*/
 
 	while (running) {
-		printf("Trigger %llu\n", triggers);
+		/*printf("Trigger %llu\n", triggers);*/
 		retval = select(pkts.timerfd+1, &rfds, NULL, NULL, NULL); /* Last parameter = NULL --> wait forever */
 		if (retval < 0 && errno == EINTR) {
 			break;
@@ -824,11 +817,10 @@ int main(int argc, char **argv)
 
 		if (current_batch >= cfg.batch_size && triggers > (pkts.triggers_behind_timer + cfg.batch_size)){
 			int idx = triggers-pkts.triggers_behind_timer-cfg.batch_size-1;
-			printf("Process packets %d-%d\n", idx, idx+cfg.batch_size-1);
+			calculate_latency(&cfg, &pkts, idx, idx+cfg.batch_size);
 			current_batch = 0;
 		}
 	}
-	printf("Loop stopped\n");
 
 	/* Cleanup */
 	if (cfg.out_file)
