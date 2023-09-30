@@ -56,7 +56,6 @@ extern bool debugen;// = false;
 extern bool running;// = true;
 
 struct pkt_time {
-	bool invalid;
 	__u16 seq;
 	struct timespec xmit;
 	struct timespec recv;
@@ -104,6 +103,7 @@ struct thread_data {
 };
 
 /* timestamping.c */
+void print_timestamp(const char *str, struct timespec stamp);
 void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts, Config *cfg);
 void *rcv_pkt(void *arg);
 void rcv_xmit_tstamp(int sock, Config *cfg, Packets *pkts, __u16 tx_seq);

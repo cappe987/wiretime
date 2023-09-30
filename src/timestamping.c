@@ -18,6 +18,11 @@
 
 #include "wiretime.h"
 
+void print_timestamp(const char *str, struct timespec stamp)
+{
+	printf("Timestamp %s: %ld.%ld\n", str, stamp.tv_sec, stamp.tv_nsec);
+}
+
 
 void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts, Config *cfg)
 {
@@ -87,7 +92,6 @@ static void recvpacket(int sock, int recvmsg_flags,
 	res = recvmsg(sock, &msg, recvmsg_flags | MSG_DONTWAIT);
 	if (res >= 0) {
 		get_timestamp(&msg, &stamp, recvmsg_flags, pkts, cfg);
-		printf("Time %ld.%ld\n", stamp->tv_sec, stamp->tv_nsec);
 		if (!stamp)
 			return;
 		save_tstamp(stamp, msg.msg_iov->iov_base,
