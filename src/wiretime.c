@@ -63,34 +63,35 @@ void help()
 	fputs(  "wiretime - Measure packet time on wire using hardware timestamping\n"
 		"\n"
 		"USAGE:\n"
-		"        wiretime --tx <IFACE1> --rx <IFACE2> [OPTIONS]\n"
+		"        wiretime --tx <interface1> --rx <interface2> [OPTIONS]\n"
 		"\n"
-		"        Transmits on <IFACE1> and receives on <IFACE2>.\n"
-		"        Both interfaces must support hardware timestamping of non-PTP packets.\n"
+		"        Transmits on <interface1> and receives on <interface2>.\n"
 		"\n"
 		"OPTIONS:\n"
-		"        -t, --tx <IFACE>\n"
-		"            Transmit packets on <IFACE>. Can be a VLAN or other interface,\n"
+		"        -t, --tx <interface>\n"
+		"            Transmit packets on <interface>. Can be a VLAN or other interface,\n"
 		"            as long as the physical port supports hardware timestamping.\n"
-		"        -r, --rx <IFACE>\n"
-		"            Receive packets on <IFACE>. Can be a VLAN or other interface,\n"
+		"        -r, --rx <interface>\n"
+		"            Receive packets on <interface>. Can be a VLAN or other interface,\n"
 		"            as long as the physical port supports hardware timestamping.\n"
-		"        -p, --pcp <PRIO>\n"
+		"        -p, --pcp <prio>\n"
 		"            PCP priority. If VLAN is not set it will use VLAN 0.\n"
 		"        -v, --vlan <VID>\n"
 		"            Tag with this VID (useful when used together with PCP).\n"
-		"        -P, --prio <PRIO>\n"
+		"        -P, --prio <prio>\n"
 		"            Socket priority. Useful for egress QoS.\n"
-		"        -o, --one-step\n"
+		"        -o, --one_step\n"
 		"            Use one-step TX instead of two-step.\n"
 		"        -O, --out <filename>\n"
 		"            Output data into file for plotting.\n"
-		"        -s, --pkts_per_sec <count>\n"
-		"            Amount of packets to transmit per second. Default: 100\n"
-		"        -S, --pkts_per_summary <count>\n"
+		"        -i, --interval <milliseconds>\n"
+		"            Interval between packets. Default: 1000\n"
+		"        -b, --batch_size <count>\n"
 		"            Amount of packets to include in every output.\n"
 		"            Together with pkts_per_sec this determines how often it will\n"
 		"            show outputs. Default: pkts_per_sec (meaning once every second)\n"
+		"        -S, --software_tstamp\n"
+		"            Perform software timestamping instead of hardware timestamping.\n"
 		"        -d, --debug\n"
 		"            Enable debug output\n"
 		"        -h, --help\n"
@@ -100,7 +101,7 @@ void help()
 		"        --plot <filename>\n"
 		"            Plots the data using Gnuplot and exports as PDF. If -O is \n"
 		"            not used it will create a temporary file for storing the data.\n"
-		"        --tstamp-all\n"
+		"        --tstamp_all\n"
 		"            Enable timestamping of non-PTP packets. On some NICs this will behave\n"
 		"            differently than timestamping PTP packets only.\n"
 
@@ -548,6 +549,52 @@ static int create_timer(Config *cfg)
 	return fd;
 }
 
+static int run(Config *cfg, Packets *pkts, int tx_sock)
+{
+	/* Count to ensure a whole batch has been sent when the time is reached */
+	int current_batch = 0;
+	__u64 triggers = 0;
+	char dummybuf[8];
+	int retval = 0;
+	fd_set rfds;
+	int idx;
+
+	/* Watch timerfd file descriptor */
+	FD_ZERO(&rfds);
+	FD_SET(pkts->timerfd, &rfds);
+
+	/* Main loop */
+	printf("Transmitting...\n");
+	while (running) {
+		retval = select(pkts->timerfd + 1, &rfds, NULL, NULL, NULL); /* Last parameter = NULL --> wait forever */
+		if (retval < 0 && errno == EINTR) {
+			retval = 0;
+			break;
+		}
+		if (retval < 0) {
+			perror("Error");
+			break;
+		}
+		if (retval == 0) {
+			continue;
+		}
+
+		if (FD_ISSET(pkts->timerfd, &rfds))
+			read(pkts->timerfd, dummybuf, 8);
+
+		sender(cfg, pkts, tx_sock);
+		triggers++;
+		current_batch++;
+
+		if (current_batch >= cfg->batch_size && triggers > (pkts->triggers_behind_timer + cfg->batch_size)){
+			idx = triggers - pkts->triggers_behind_timer - cfg->batch_size - 1;
+			calculate_latency(cfg, pkts, idx, idx + cfg->batch_size);
+			current_batch = 0;
+		}
+	}
+
+	return retval;
+}
 
 static int parse_args(int argc, char **argv, Config *cfg)
 {
@@ -562,12 +609,13 @@ static int parse_args(int argc, char **argv, Config *cfg)
 		{ "pcp",              required_argument, NULL,    'p' },
 		{ "vlan",             required_argument, NULL,    'v' },
 		{ "prio",             required_argument, NULL,    'P' },
-		{ "pkts_per_summary", required_argument, NULL,    'S' },
-		{ "pkts_per_sec",     required_argument, NULL,    's' },
+		{ "batch_size",       required_argument, NULL,    'b' },
+		{ "interval",         required_argument, NULL,    'i' },
 		{ "out",              required_argument, NULL,    'O' },
+		{ "one_step",         no_argument,       NULL,    'o' },
+		{ "software_tstamp",  no_argument,       NULL,    'S' },
 		{ "plot",             required_argument, NULL,    '1' },
-		{ "one-step",         no_argument,       NULL,    'o' },
-		{ "tstamp-all",       no_argument,       NULL,    '2' },
+		{ "tstamp_all",       no_argument,       NULL,    '2' },
 		{ "debug",            no_argument,       NULL,    'd' },
 		{ NULL,               0,                 NULL,     0  }
 	};
@@ -773,55 +821,14 @@ int main(int argc, char **argv)
 	get_smac(tx_sock, cfg.tx_iface, mac);
 	set_smac(pkts.frame, mac);
 
-	/* Main loop */
-
 	pkts.timerfd = create_timer(&cfg);
 	if (pkts.timerfd < 0)
 		goto out_err_timer;
 
-	/* Wait */
-	fd_set rfds;
-	int retval;
-
-	/* Watch timerfd file descriptor */
-	FD_ZERO(&rfds);
-	/*FD_SET(0, &rfds);*/
-	FD_SET(pkts.timerfd, &rfds);
-
-	__u64 triggers = 0;
-	/* Count to ensure a whole batch has been sent when the time is reached */
-	int current_batch = 0;
-
-	char dummybuf[8];
-
-	printf("Transmitting...\n");
-	while (running) {
-		retval = select(pkts.timerfd+1, &rfds, NULL, NULL, NULL); /* Last parameter = NULL --> wait forever */
-		if (retval < 0 && errno == EINTR) {
-			break;
-		}
-		if (retval < 0) {
-			perror("Error");
-			break;
-		}
-		if (retval == 0) {
-			printf("Continuing...\n");
-			continue;
-		}
-
-		if (FD_ISSET(pkts.timerfd, &rfds))
-			read(pkts.timerfd, dummybuf, 8);
-
-		sender(&cfg, &pkts, tx_sock);
-		triggers++;
-		current_batch++;
-
-		if (current_batch >= cfg.batch_size && triggers > (pkts.triggers_behind_timer + cfg.batch_size)){
-			int idx = triggers-pkts.triggers_behind_timer-cfg.batch_size-1;
-			calculate_latency(&cfg, &pkts, idx, idx+cfg.batch_size);
-			current_batch = 0;
-		}
-	}
+	/* Start the main program */
+	err = run(&cfg, &pkts, tx_sock);
+	if (err)
+		goto out_err_timer;
 
 	pthread_join(rx_thread, NULL);
 
@@ -836,9 +843,11 @@ out_err_timer:
 out_err_tx_sock:
 	pthread_kill(rx_thread, SIGINT);
 	close(rx_args.sockfd);
-out:
+	return err;
 
+out:
 	close(rx_args.sockfd);
+	close(tx_sock);
 
 	if (cfg.out_file)
 		fclose(cfg.out_file);
