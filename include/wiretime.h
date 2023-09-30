@@ -45,13 +45,6 @@
 
 #define DEBUG(...) _DEBUG(stderr, __VA_ARGS__)
 
-static void bail(const char *error)
-{
-	printf("%s: %s\n", error, strerror(errno));
-	exit(1);
-}
-
-
 extern bool debugen;// = false;
 extern bool running;// = true;
 
@@ -100,6 +93,7 @@ struct thread_data {
 	Config *cfg;
 	Packets *pkts;
 	int sockfd;
+	int tx_sockfd;
 };
 
 /* timestamping.c */

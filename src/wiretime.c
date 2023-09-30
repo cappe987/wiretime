@@ -50,12 +50,13 @@
 #define TIME_SEC_OFFSET 48
 #define TIME_NSEC_OFFSET 54
 
-#define DOMAIN_NUM 0xff
-
+/* The choice of domain number is arbitrary (other than the fact that CA are my
+ * initials). It could be made configurable.
+ */
+#define DOMAIN_NUM 0xCA
 
 bool debugen = false;
 bool running = true;
-
 
 void help()
 {
@@ -441,12 +442,12 @@ void calculate_latency(Config *cfg, Packets *pkts, int start, int end)
 	}
 }
 
-void *sender(void *args)
+void sender(Config *cfg, Packets *pkts, int sock)
 {
-	struct thread_data *data = args;
-	int sock = data->sockfd;
-	Config *cfg = data->cfg;
-	Packets *pkts = data->pkts;
+	/*struct thread_data *data = args;*/
+	/*int sock = data->sockfd;*/
+	/*Config *cfg = data->cfg;*/
+	/*Packets *pkts = data->pkts;*/
 
 	int length = 0;
 	__u16 tx_seq;
@@ -478,7 +479,7 @@ void *sender(void *args)
 	/*}*/
 }
 
-void plot(Config *cfg, char *data_filename)
+static void plot(Config *cfg, char *data_filename)
 {
 	char plot[200];
 	char output[200];
@@ -523,6 +524,30 @@ void plot(Config *cfg, char *data_filename)
 	fclose(gnuplotPipe);
 	printf("\nPlot written to '%s'\n", cfg->plot_filename);
 }
+
+static int make_tmp_fd(char *tmpnamebuf)
+{
+	memset(tmpnamebuf, 0, sizeof(tmpnamebuf));
+	strncpy(tmpnamebuf, "/tmp/wiretime-XXXXXX", 20);
+	return mkstemp(tmpnamebuf);
+}
+
+static int create_timer(Config *cfg)
+{
+	struct itimerspec timer;
+
+	int fd = timerfd_create(CLOCK_REALTIME, 0);
+	if (fd < 0)
+		return fd;
+	timer.it_value.tv_sec = cfg->interval / 1000;
+	timer.it_value.tv_nsec = (cfg->interval % 1000) * 1000000;
+	timer.it_interval.tv_sec = cfg->interval / 1000;
+	timer.it_interval.tv_nsec = (cfg->interval % 1000) * 1000000;
+
+	timerfd_settime(fd, 0, &timer, NULL);
+	return fd;
+}
+
 
 static int parse_args(int argc, char **argv, Config *cfg)
 {
@@ -575,34 +600,36 @@ static int parse_args(int argc, char **argv, Config *cfg)
 			case 'p':
 				cfg->pcp = strtol(optarg, NULL, 0);
 				if (cfg->pcp < 0 || cfg->pcp > 7) {
-					fprintf(stderr, "Out of range: PCP must be 0-7\n");
+					ERR("out of range: PCP must be 0-7\n");
 					return EINVAL;
 				}
 				break;
 			case 'P':
 				cfg->priority = strtol(optarg, NULL, 0);
 				if (cfg->priority < 0 || cfg->priority > 7) {
-					fprintf(stderr, "Out of range: priority must be 0-7\n");
+					ERR("out of range: priority must be 0-7\n");
 					return EINVAL;
 				}
 				break;
 			case 'v':
 				cfg->vlan = strtol(optarg, NULL, 0);
 				if (cfg->vlan < 0 || cfg->vlan > 4095) {
-					fprintf(stderr, "Out of range: VLAN must be 0-4095\n");
+					ERR("out of range: VLAN must be 0-4095\n");
 					return EINVAL;
 				}
 				break;
 			case 'i':
 				cfg->interval = strtoul(optarg, NULL, 0);
 				if (cfg->interval <= 0) {
-					bail("Interval must be greater than 0");
+					ERR("interval must be greater than 0");
+					return EINVAL;
 				}
 				break;
 			case 'b':
 				cfg->batch_size = strtoul(optarg, NULL, 0);
 				if (cfg->batch_size <= 0 || cfg->batch_size > 32768) {
-					bail("Batch size must be a value 1-32768");
+					ERR("batch size must be a value 1-32768");
+					return EINVAL;
 				}
 				break;
 			case 'd':
@@ -616,11 +643,9 @@ static int parse_args(int argc, char **argv, Config *cfg)
 				exit(0);
 			case '?':
 				if (optopt == 'c')
-					fprintf (stderr, "Option -%c requires an argument.\n", optopt);
+					fprintf(stderr, "Option -%c requires an argument.\n", optopt);
 				else
-					fprintf (stderr,
-						"Unknown option character `\\x%x'.\n",
-						optopt);
+					fprintf(stderr, "Unknown option character `\\x%x'.\n", optopt);
 				return EINVAL;
 			default:
 				help();
@@ -630,44 +655,30 @@ static int parse_args(int argc, char **argv, Config *cfg)
 
 	if (!cfg->tx_iface) {
 		ERR("missing tx interface\n");
-		return -1;
+		return EINVAL;
 	}
 	if (!cfg->rx_iface) {
 		ERR("missing rx interface\n");
-		return -1;
+		return EINVAL;
 	}
 
 	if (strcmp(cfg->tx_iface, cfg->rx_iface) == 0) {
 		ERR("tx and rx iface cannot be the same\n");
-		return -1;
+		return EINVAL;
 	}
 
 	if (!cfg->ptp_only && cfg->one_step) {
 		ERR("can't combine tstamp-all with one-step\n");
-		return -1;
+		return EINVAL;
 	}
 
-	/* If not set, default to one summary per second */
-	/*if (cfg->pkts_per_summary == 0)*/
-		/*cfg->pkts_per_summary = cfg->pkts_per_sec;*/
-
-
 	return 0;
-}
-
-static int make_tmp_fd(char *tmpnamebuf)
-{
-	memset(tmpnamebuf, 0, sizeof(tmpnamebuf));
-	/*cfg.out_filename = tmpnamebuf;*/
-	strncpy(tmpnamebuf, "/tmp/wiretime-XXXXXX", 20);
-	return mkstemp(tmpnamebuf);
 }
 
 int main(int argc, char **argv)
 {
 	unsigned char mac[ETH_ALEN];
 	bool using_tmpfile = false;
-	struct thread_data tx_args;
 	struct thread_data rx_args;
 	pthread_t rx_thread;
 	pthread_t tx_thread;
@@ -731,19 +742,8 @@ int main(int argc, char **argv)
 
 	signal(SIGINT, sig_handler);
 	pthread_mutex_init(&pkts.list_lock, NULL);
-	/* pktlist is a circular buffer with space for two intervals of packets */
-	/* pkts is a circular buffer with space for two intervals of packets */
-
-	int timer_interval_ms; // = cfg.batch_size * cfg.interval;//) + 1000;
-	pkts.timerfd = timerfd_create(CLOCK_REALTIME, 0);
-	struct itimerspec timer;
-	timer.it_value.tv_sec = cfg.interval / 1000;
-	timer.it_value.tv_nsec = (cfg.interval % 1000) * 1000000;
-	timer.it_interval.tv_sec = cfg.interval / 1000;
-	timer.it_interval.tv_nsec = (cfg.interval % 1000) * 1000000;
 
 	/* How many times the timer has to trigger until 1 second has passed */
-	/*pkts.triggers_behind_timer = 1000 / (cfg.batch_size * cfg.interval);*/
 	pkts.triggers_behind_timer = 0;
 	for (int i = 0; i < 1000; i += cfg.interval)
 		pkts.triggers_behind_timer++;
@@ -754,24 +754,30 @@ int main(int argc, char **argv)
 		return ENOMEM;
 
 	/* Receiver */
-	rx_args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only, cfg.software_ts);
 	rx_args.cfg = &cfg;
 	rx_args.pkts = &pkts;
+	rx_args.sockfd = setup_rx_sock(cfg.rx_iface, cfg.priority, cfg.ptp_only, cfg.software_ts);
+	if (rx_args.sockfd < 0) {
+		ERR("failed setting up RX socket\n");
+		goto out;
+	}
+
 	pthread_create(&rx_thread, NULL, rcv_pkt, &rx_args);
 
 	/* Sender */
-	tx_args.sockfd = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step, cfg.software_ts);
+	tx_sock = setup_tx_sock(cfg.tx_iface, cfg.priority, cfg.ptp_only, cfg.one_step, cfg.software_ts);
+	if (tx_sock < 0) {
+		ERR("failed setting up TX socket\n");
+		goto out_err_tx_sock;
+	}
 	get_smac(tx_sock, cfg.tx_iface, mac);
 	set_smac(pkts.frame, mac);
-	tx_args.cfg = &cfg;
-	tx_args.pkts = &pkts;
-	/*pthread_create(&tx_thread, NULL, sender, &tx_args);*/
 
 	/* Main loop */
-	/*printf("Transmitting...\n");*/
-	/*sender(tx_sock, &cfg, &pkts);*/
 
-	timerfd_settime(pkts.timerfd, 0, &timer, NULL);
+	pkts.timerfd = create_timer(&cfg);
+	if (pkts.timerfd < 0)
+		goto out_err_timer;
 
 	/* Wait */
 	fd_set rfds;
@@ -787,13 +793,9 @@ int main(int argc, char **argv)
 	int current_batch = 0;
 
 	char dummybuf[8];
-	/*struct timeval tv;*/
-	/*tv.tv_sec = 0;*/
-	/*tv.tv_usec = 1000000;*/
-	/*read(pkts.timerfd, dummybuf, 8);*/
 
+	printf("Transmitting...\n");
 	while (running) {
-		/*printf("Trigger %llu\n", triggers);*/
 		retval = select(pkts.timerfd+1, &rfds, NULL, NULL, NULL); /* Last parameter = NULL --> wait forever */
 		if (retval < 0 && errno == EINTR) {
 			break;
@@ -810,8 +812,7 @@ int main(int argc, char **argv)
 		if (FD_ISSET(pkts.timerfd, &rfds))
 			read(pkts.timerfd, dummybuf, 8);
 
-		/*pkts.next_seq++;*/
-		sender(&tx_args);
+		sender(&cfg, &pkts, tx_sock);
 		triggers++;
 		current_batch++;
 
@@ -822,19 +823,31 @@ int main(int argc, char **argv)
 		}
 	}
 
-	/* Cleanup */
-	if (cfg.out_file)
-		fclose(cfg.out_file);
-	/*pthread_join(rx_thread, NULL);*/
-	/*pthread_join(tx_thread, NULL);*/
-	free(pkts.list);
+	pthread_join(rx_thread, NULL);
 
+	/* Cleanup */
 	if (cfg.plot)
 		plot(&cfg, cfg.out_filename);
+
+	goto out;
+
+out_err_timer:
+	close(tx_sock);
+out_err_tx_sock:
+	pthread_kill(rx_thread, SIGINT);
+	close(rx_args.sockfd);
+out:
+
+	close(rx_args.sockfd);
+
+	if (cfg.out_file)
+		fclose(cfg.out_file);
 
 	if (using_tmpfile)
 		remove(cfg.out_filename);
 
-	return 0;
+	free(pkts.list);
+
+	return err;
 }
 

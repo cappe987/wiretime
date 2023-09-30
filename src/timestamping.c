@@ -18,11 +18,16 @@
 
 #include "wiretime.h"
 
+static void bail(const char *error)
+{
+	printf("%s: %s\n", error, strerror(errno));
+	exit(1);
+}
+
 void print_timestamp(const char *str, struct timespec stamp)
 {
 	printf("Timestamp %s: %ld.%ld\n", str, stamp.tv_sec, stamp.tv_nsec);
 }
-
 
 void get_timestamp(struct msghdr *msg, struct timespec **stamp, int recvmsg_flags, Packets *pkts, Config *cfg)
 {
@@ -106,7 +111,6 @@ void *rcv_pkt(void *arg)
 	fd_set readfs, errorfs;
 	int res;
 
-
 	while (running) {
 		FD_ZERO(&readfs);
 		FD_ZERO(&errorfs);
@@ -166,12 +170,57 @@ static void setsockopt_txtime(int fd)
 		printf("getsockopt txtime: mismatch\n");
 }
 
+static void setup_hwconfig(char *interface, int sock, int st_tstamp_flags,
+			   bool ptp_only, bool one_step)
+{
+	struct hwtstamp_config hwconfig, hwconfig_requested;
+	struct ifreq hwtstamp;
+
+	/* Set the SIOCSHWTSTAMP ioctl */
+	memset(&hwtstamp, 0, sizeof(hwtstamp));
+	strncpy(hwtstamp.ifr_name, interface, sizeof(hwtstamp.ifr_name));
+	hwtstamp.ifr_data = (void *)&hwconfig;
+	memset(&hwconfig, 0, sizeof(hwconfig));
+
+	if (st_tstamp_flags & SOF_TIMESTAMPING_TX_HARDWARE) {
+		if (one_step)
+			hwconfig.tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
+		else
+			hwconfig.tx_type = HWTSTAMP_TX_ON;
+	} else {
+		hwconfig.tx_type = HWTSTAMP_TX_OFF;
+	}
+	if (ptp_only)
+		hwconfig.rx_filter =
+			(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
+			HWTSTAMP_FILTER_PTP_V2_SYNC : HWTSTAMP_FILTER_NONE;
+	else
+		hwconfig.rx_filter =
+			(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
+			HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
+
+	hwconfig_requested = hwconfig;
+	if (ioctl(sock, SIOCSHWTSTAMP, &hwtstamp) < 0) {
+		if ((errno == EINVAL || errno == ENOTSUP) &&
+		    hwconfig_requested.tx_type == HWTSTAMP_TX_OFF &&
+		    hwconfig_requested.rx_filter == HWTSTAMP_FILTER_NONE) {
+			printf("SIOCSHWTSTAMP: disabling hardware time stamping not possible\n");
+			exit(1);
+		}
+		else {
+			printf("SIOCSHWTSTAMP: operation not supported!\n");
+			exit(1);
+		}
+	}
+	printf("SIOCSHWTSTAMP: tx_type %d requested, got %d; rx_filter %d requested, got %d\n",
+	       hwconfig_requested.tx_type, hwconfig.tx_type,
+	       hwconfig_requested.rx_filter, hwconfig.rx_filter);
+}
+
 int setup_sock(char *interface, int prio, int st_tstamp_flags,
 	       bool ptp_only, bool one_step, bool software_ts)
 {
-	struct hwtstamp_config hwconfig, hwconfig_requested;
 	struct sockaddr_ll addr;
-	struct ifreq hwtstamp;
 	struct ifreq device;
 	socklen_t len;
 	int sock;
@@ -186,46 +235,8 @@ int setup_sock(char *interface, int prio, int st_tstamp_flags,
 	if (ioctl(sock, SIOCGIFINDEX, &device) < 0)
 		bail("getting interface index");
 
-	/* Set the SIOCSHWTSTAMP ioctl */
-	memset(&hwtstamp, 0, sizeof(hwtstamp));
-	strncpy(hwtstamp.ifr_name, interface, sizeof(hwtstamp.ifr_name));
-	hwtstamp.ifr_data = (void *)&hwconfig;
-	memset(&hwconfig, 0, sizeof(hwconfig));
-
 	if (!software_ts) {
-		if (st_tstamp_flags & SOF_TIMESTAMPING_TX_HARDWARE) {
-			if (one_step)
-				hwconfig.tx_type = HWTSTAMP_TX_ONESTEP_SYNC;
-			else
-				hwconfig.tx_type = HWTSTAMP_TX_ON;
-		} else {
-			hwconfig.tx_type = HWTSTAMP_TX_OFF;
-		}
-		if (ptp_only)
-			hwconfig.rx_filter =
-				(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
-				HWTSTAMP_FILTER_PTP_V2_SYNC : HWTSTAMP_FILTER_NONE;
-		else
-			hwconfig.rx_filter =
-				(st_tstamp_flags & SOF_TIMESTAMPING_RX_HARDWARE) ?
-				HWTSTAMP_FILTER_ALL : HWTSTAMP_FILTER_NONE;
-
-		hwconfig_requested = hwconfig;
-		if (ioctl(sock, SIOCSHWTSTAMP, &hwtstamp) < 0) {
-			if ((errno == EINVAL || errno == ENOTSUP) &&
-			    hwconfig_requested.tx_type == HWTSTAMP_TX_OFF &&
-			    hwconfig_requested.rx_filter == HWTSTAMP_FILTER_NONE) {
-				printf("SIOCSHWTSTAMP: disabling hardware time stamping not possible\n");
-				exit(1);
-			}
-			else {
-				printf("SIOCSHWTSTAMP: operation not supported!\n");
-				exit(1);
-			}
-		}
-		printf("SIOCSHWTSTAMP: tx_type %d requested, got %d; rx_filter %d requested, got %d\n",
-		       hwconfig_requested.tx_type, hwconfig.tx_type,
-		       hwconfig_requested.rx_filter, hwconfig.rx_filter);
+		setup_hwconfig(interface, sock, st_tstamp_flags, ptp_only, one_step);
 	}
 
 	/* bind to PTP port */
@@ -243,17 +254,10 @@ int setup_sock(char *interface, int prio, int st_tstamp_flags,
 	if (setsockopt(sock, SOL_SOCKET, SO_PRIORITY, &prio, sizeof(int)))
 		bail("setsockopt SO_PRIORITY");
 
-	/*if (software_ts) {*/
-		/*if (st_tstamp_flags &&*/
-		    /*setsockopt(sock, SOL_SOCKET, SO_TIMESTAMP,*/
-			       /*&st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)*/
-			/*printf("setsockopt SO_TIMESTAMP not supported\n");*/
-	/*} else {*/
-		if (st_tstamp_flags &&
-		    setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING,
-			       &st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)
-			printf("setsockopt SO_TIMESTAMPING not supported\n");
-	/*}*/
+	if (st_tstamp_flags &&
+	    setsockopt(sock, SOL_SOCKET, SO_TIMESTAMPING,
+		       &st_tstamp_flags, sizeof(st_tstamp_flags)) < 0)
+		printf("setsockopt SO_TIMESTAMPING not supported\n");
 
 	/* verify socket options */
 	len = sizeof(val);
