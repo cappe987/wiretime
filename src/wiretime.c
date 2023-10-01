@@ -89,7 +89,7 @@ void help()
 		"        -b, --batch_size <count>\n"
 		"            Amount of packets to include in every output.\n"
 		"            Together with pkts_per_sec this determines how often it will\n"
-		"            show outputs. Default: pkts_per_sec (meaning once every second)\n"
+		"            show outputs. Default: 1\n"
 		"        -S, --software_tstamp\n"
 		"            Perform software timestamping instead of hardware timestamping.\n"
 		"        -d, --debug\n"
